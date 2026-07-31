@@ -201,15 +201,7 @@ function RouteFinder() {
           {result?.chosen_plan && (
             <>
               <div className="mt-5 rounded-lg border border-panel-border p-4">
-                <div className="mb-3 flex items-center justify-between">
-                  <h3 className="text-[15px] font-semibold">Top Recommendation</h3>
-                  <button
-                    onClick={() => setExplainOpen(true)}
-                    className="rounded-md border border-panel-border px-2.5 py-1 text-[12px] font-medium text-panel-foreground hover:bg-[var(--panel-border)]"
-                  >
-                    Why this plan?
-                  </button>
-                </div>
+                <h3 className="mb-3 text-[15px] font-semibold">Top Recommendation</h3>
 
                 <div className="rounded-md border border-panel-border px-3 py-3">
                   <p className="text-[14px] font-medium">
@@ -236,6 +228,14 @@ function RouteFinder() {
                   <span>Deadline: {deadline} h</span>
                   <span>Sources: {result.chosen_plan.sources_used.length}</span>
                 </div>
+
+                <button
+                  onClick={() => setExplainOpen(true)}
+                  className="mt-3 flex w-full items-center justify-between rounded-md border border-panel-foreground px-4 py-2.5 text-[14px] font-medium text-panel-foreground transition-colors hover:bg-panel-foreground hover:text-panel"
+                >
+                  Why this plan? See full explanation
+                  <span aria-hidden>→</span>
+                </button>
               </div>
 
               {alternatives.length > 0 && (

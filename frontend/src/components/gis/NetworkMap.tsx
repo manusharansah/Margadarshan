@@ -162,17 +162,17 @@ export function NetworkMap({ nodes, edges, destination, plan, layers }: Props) {
           const b = byId.get(leg.path[i + 1]!);
           if (!a || !b) continue;
           const e = edgeByKey.get(edgeKey(a.node_id, b.node_id));
-          if (!e) {
-            pts.push(project(a.x, a.y), project(b.x, b.y));
-            continue;
-          }
-          let seg = shape(e, a, b);
+          const pa0 = project(a.x, a.y);
+          const pb0 = project(b.x, b.y);
+          let seg = e
+            ? shape(e, a, b)
+            : cachedGeometry(edgeKey(a.node_id, b.node_id)) ??
+              syntheticRoad(pa0, pb0, undefined, edgeKey(a.node_id, b.node_id));
           // shape() is orientation-agnostic; align it with travel direction.
-          const pa = project(a.x, a.y);
           const first = seg[0]!;
           const last = seg[seg.length - 1]!;
-          const dFirst = Math.hypot(first[0] - pa[0], first[1] - pa[1]);
-          const dLast = Math.hypot(last[0] - pa[0], last[1] - pa[1]);
+          const dFirst = Math.hypot(first[0] - pa0[0], first[1] - pa0[1]);
+          const dLast = Math.hypot(last[0] - pa0[0], last[1] - pa0[1]);
           if (dLast < dFirst) seg = [...seg].reverse();
           pts.push(...(pts.length ? seg.slice(1) : seg));
         }
