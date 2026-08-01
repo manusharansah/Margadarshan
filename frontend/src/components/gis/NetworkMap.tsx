@@ -260,6 +260,5 @@ export function NetworkMap({ nodes, edges, destination, plan, layers }: Props) {
     };
   }, [nodes, edges]);
 
-
   return <div ref={containerRef} className="h-full w-full" />;
 }
