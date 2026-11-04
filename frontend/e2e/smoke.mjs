@@ -110,7 +110,7 @@ assert.equal((await page.request.get(BASE + "/api/health")).status(), 200);
 // 6. Other pages
 await page.getByRole("link", { name: "Inventory" }).click();
 await page.getByRole("heading", { name: "Inventory" }).waitFor();
-await page.getByRole("cell", { name: /Example Warehouse A/ }).waitFor();
+await page.getByRole("cell", { name: /Sample Depot - Banepa/ }).waitFor();
 await page.getByRole("cell", { name: /Total/ }).waitFor();
 await shot(page, "05-inventory");
 await page.getByRole("link", { name: "Data", exact: true }).click();

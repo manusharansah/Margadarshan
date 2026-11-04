@@ -1,5 +1,0 @@
-id,name,lat,lng,units_in_stock,vehicles_available,vehicle_capacity
-WH-001,Example Warehouse A (replace),27.6298,85.5214,900,3,200
-WH-002,Example Warehouse B (replace),27.5847,85.5225,350,1,200
-WH-003,Example Warehouse C (replace),27.6186,85.5395,120,2,200
-WH-004,Example Warehouse D (replace),27.5650,85.4800,600,0,200

@@ -24,8 +24,8 @@ surface was inferred** because OSM has no `surface` tag. Large areas grow quickl
 
 ## Load inventory
 
-CSV columns: `id,name,lat,lng,units_in_stock,vehicles_available[,vehicle_capacity]` (template:
-`backend/examples/warehouses.template.csv` — placeholder values, replace them).
+CSV columns: `id,name,lat,lng,units_in_stock,vehicles_available[,vehicle_capacity]` (sample:
+`backend/examples/warehouses.sample.csv` — sample values, replace them).
 
 ```bash
 python -m gis_backend.seed_warehouses my_inventory.csv         # local

@@ -1,0 +1,11 @@
+id,name,lat,lng,units_in_stock,vehicles_available,vehicle_capacity
+SAMPLE-KTM-01,Sample Depot - Kathmandu (Tripureshwor),27.6935,85.3150,1800,6,300
+SAMPLE-LAL-01,Sample Depot - Lalitpur (Satdobato),27.6588,85.3247,950,4,200
+SAMPLE-BKT-01,Sample Depot - Bhaktapur (Suryabinayak),27.6710,85.4298,1200,5,200
+SAMPLE-THM-01,Sample Depot - Thimi,27.6811,85.3857,420,2,200
+SAMPLE-SNK-01,Sample Depot - Sankhu,27.7167,85.4667,260,1,150
+SAMPLE-BNP-01,Sample Depot - Banepa,27.6298,85.5214,900,3,200
+SAMPLE-DHK-01,Sample Depot - Dhulikhel,27.6186,85.5395,350,2,200
+SAMPLE-PNT-01,Sample Depot - Panauti,27.5847,85.5225,600,0,200
+SAMPLE-PCK-01,Sample Depot - Panchkhal,27.6333,85.6333,150,1,150
+SAMPLE-DLG-01,Sample Depot - Dolalghat,27.6392,85.7114,700,3,250

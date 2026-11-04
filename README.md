@@ -38,7 +38,7 @@ Full design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 # Backend
 cd backend && python -m venv .venv && . .venv/bin/activate && pip install -r requirements-dev.txt
 python -m gis_backend.ingest --bbox 27.45 85.25 27.80 85.80 --out data/network.json.gz   # needs overpass-api.de
-python -m gis_backend.seed_warehouses examples/warehouses.template.csv              # replace with YOUR inventory
+python -m gis_backend.seed_warehouses examples/warehouses.sample.csv              # replace with YOUR inventory (format: docs/INVENTORY_FORMAT.md)
 export MARGA_ADMIN_API_KEY=change-me GEMMA_API_KEY=...   # GEMMA_API_KEY optional
 uvicorn gis_backend.api:app --port 8000
 

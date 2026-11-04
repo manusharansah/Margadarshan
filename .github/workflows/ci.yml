@@ -48,7 +48,7 @@ jobs:
         run: |
           python scripts/make_dev_fixture.py data/dev/network.json.gz
           export MARGA_DATA_DIR=data/dev DATABASE_URL=sqlite:///data/dev/marga.db MARGA_WEATHER_ENABLED=false
-          python -m gis_backend.seed_warehouses examples/warehouses.template.csv
+          python -m gis_backend.seed_warehouses examples/warehouses.sample.csv
           nohup uvicorn gis_backend.api:app --port 8000 > /tmp/api.log 2>&1 &
       - name: Start web
         working-directory: frontend
