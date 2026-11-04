@@ -1,0 +1,18 @@
+# Local full stack:  docker compose up --build
+# Put a real network artifact at ./backend/data/network.json.gz first (see docs/DATA_SOURCES.md).
+services:
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: sqlite:////data/marga.db
+      MARGA_ADMIN_API_KEY: ${MARGA_ADMIN_API_KEY:-}
+      GEMMA_API_KEY: ${GEMMA_API_KEY:-}
+      CORS_ORIGINS: http://localhost:3000
+    volumes: ["./backend/data:/data"]
+    ports: ["8000:8000"]
+  frontend:
+    build: ./frontend
+    environment:
+      GIS_API_BASE: http://backend:8000
+    ports: ["3000:3000"]
+    depends_on: [backend]

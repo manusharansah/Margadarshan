@@ -1,0 +1,29 @@
+name: Deploy to AWS
+# Manual trigger. Needs repo variables AWS_REGION, AWS_ROLE_ARN (GitHub OIDC role), ECR_BACKEND, ECR_FRONTEND,
+# ECS_CLUSTER, ECS_SERVICE, CFN_STACK. No long-lived AWS keys are stored in GitHub.
+on: { workflow_dispatch: {} }
+permissions: { id-token: write, contents: read }
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with: { role-to-assume: "${{ vars.AWS_ROLE_ARN }}", aws-region: "${{ vars.AWS_REGION }}" }
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - name: Build and push images
+        run: |
+          B=${{ steps.ecr.outputs.registry }}/${{ vars.ECR_BACKEND }}:${{ github.sha }}
+          F=${{ steps.ecr.outputs.registry }}/${{ vars.ECR_FRONTEND }}:${{ github.sha }}
+          docker build -t $B backend && docker push $B
+          docker build -t $F frontend && docker push $F
+          echo "B=$B" >> $GITHUB_ENV; echo "F=$F" >> $GITHUB_ENV
+      - name: Update stack (new image tags)
+        run: |
+          aws cloudformation deploy --stack-name ${{ vars.CFN_STACK }} --template-file infra/marga.cfn.yml \
+            --capabilities CAPABILITY_IAM --no-fail-on-empty-changeset \
+            --parameter-overrides BackendImage=$B FrontendImage=$F \
+              VpcId=${{ vars.VPC_ID }} PublicSubnetIds=${{ vars.SUBNET_IDS }}
+      - run: aws ecs wait services-stable --cluster ${{ vars.ECS_CLUSTER }} --services ${{ vars.ECS_SERVICE }}

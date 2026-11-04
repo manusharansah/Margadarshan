@@ -11,6 +11,7 @@ import { useEffect, type ReactNode } from "react";
 
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
+import { AppShell } from "../components/AppShell";
 
 function NotFoundComponent() {
   return (
@@ -78,13 +79,18 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: "MargaAI Nepal" },
-      { name: "description", content: "GIS-based delivery route optimization for Nepal's terrain." },
-      { name: "author", content: "Lovable" },
+      {
+        name: "description",
+        content:
+          "Terrain- and hazard-aware delivery route planning for Nepal, on real road and elevation data.",
+      },
       { property: "og:title", content: "MargaAI Nepal" },
-      { property: "og:description", content: "GIS-based delivery route optimization for Nepal's terrain." },
+      {
+        property: "og:description",
+        content: "Terrain- and hazard-aware delivery route planning for Nepal.",
+      },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
-      { name: "twitter:site", content: "@Lovable" },
     ],
     links: [
       {
@@ -98,7 +104,6 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
         rel: "stylesheet",
         href: "https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap",
       },
-      { rel: "stylesheet", href: "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" },
     ],
   }),
   shellComponent: RootShell,
@@ -127,7 +132,9 @@ function RootComponent() {
   return (
     <QueryClientProvider client={queryClient}>
       {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
-      <Outlet />
+      <AppShell>
+        <Outlet />
+      </AppShell>
     </QueryClientProvider>
   );
 }

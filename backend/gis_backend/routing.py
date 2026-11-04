@@ -1,158 +1,151 @@
 """
-Routing engine (workflow doc, Section 7):
-  - Yen's K-shortest paths for source -> destination routing (via
-    networkx.shortest_simple_paths, which implements Yen's algorithm).
-  - Held-Karp exact TSP (open path) for the case where a single vehicle
-    must visit several warehouses in sequence before delivering.
+Graph routing: Yen's K-shortest paths and exact Held-Karp TSP.
 
-Nothing here calls an LLM -- this module only does graph math.
+Pure graph math - nothing here calls an LLM. All metrics are summed from the
+per-edge values on the road graph (length, time, cost, direction-aware fuel).
 """
+from __future__ import annotations
+
 from itertools import combinations
 from typing import Dict, List, Optional
 
 import networkx as nx
 
-from .edge_weight import compute_edge_weight, compute_edge_time_hours, compute_edge_fuel
-from .models import StorageNode, RoadEdge
+from .models import LatLngElev
 
 
-def build_graph(nodes: Dict[str, StorageNode], edges: List[RoadEdge]) -> nx.Graph:
-    G = nx.Graph()
-    for node_id, node in nodes.items():
-        G.add_node(node_id, data=node)
-    for edge in edges:
-        w = compute_edge_weight(edge)
-        t = compute_edge_time_hours(edge)
-        f = compute_edge_fuel(edge)
-        edge.weight = w
-        edge.time_hours = t
-        edge.fuel_estimate = f
-        G.add_edge(edge.node_a, edge.node_b, weight=w, time=t, fuel=f, length=edge.length_km, data=edge)
-    return G
+def _fuel(data: dict, u: int) -> float:
+    return data["fuel_ab"] if u == data["a"] else data["fuel_ba"]
 
 
-def k_shortest_paths(G: nx.Graph, source: str, target: str, k: int = 3) -> List[list]:
-    """Yen's K-shortest paths, ranked by edge_weight cost."""
+def path_metrics(G: nx.Graph, path: List[int]) -> Dict[str, float]:
+    dist = time_h = cost = fuel = ascent = descent = hazard = 0.0
+    for u, v in zip(path, path[1:]):
+        d = G[u][v]
+        e = d["edge"]
+        fwd = u == d["a"]
+        dist += d["length"]
+        time_h += d["time"]
+        cost += d["weight"]
+        fuel += _fuel(d, u)
+        ascent += e.ascent_ab_m if fwd else e.descent_ab_m
+        descent += e.descent_ab_m if fwd else e.ascent_ab_m
+        hazard = max(hazard, d["hazard"])
+    return {"distance_km": dist, "time_hours": time_h, "edge_cost": cost, "fuel_litres": fuel,
+            "ascent_m": ascent, "descent_m": descent, "max_hazard": hazard}
+
+
+def path_geometry(G: nx.Graph, path: List[int]) -> List[LatLngElev]:
+    """Road polyline (lat, lng, elevation) for a node path, oriented along travel."""
+    if len(path) == 1:
+        n = G.nodes[path[0]]
+        return [(n["lat"], n["lng"], n["elev"])]
+    out: List[LatLngElev] = []
+    for u, v in zip(path, path[1:]):
+        d = G[u][v]
+        geom = list(d["edge"].geometry)
+        if u != d["a"]:
+            geom.reverse()
+        out.extend(geom if not out else geom[1:])
+    return out
+
+
+def k_shortest_paths(G: nx.Graph, source: int, target: int, k: int = 3) -> List[List[int]]:
+    """Yen's algorithm (networkx ``shortest_simple_paths``), ranked by routing cost."""
     if source not in G or target not in G:
         return []
     try:
         gen = nx.shortest_simple_paths(G, source, target, weight="weight")
+        out: List[List[int]] = []
+        for p in gen:
+            out.append(p)
+            if len(out) >= k:
+                break
+        return out
     except (nx.NetworkXNoPath, nx.NodeNotFound):
         return []
-    paths = []
-    for path in gen:
-        paths.append(path)
-        if len(paths) >= k:
-            break
-    return paths
 
 
-def path_metrics(G: nx.Graph, path: list):
-    distance = sum(G[u][v]["length"] for u, v in zip(path, path[1:]))
-    time_hours = sum(G[u][v]["time"] for u, v in zip(path, path[1:]))
-    cost = sum(G[u][v]["weight"] for u, v in zip(path, path[1:]))
-    fuel = sum(G[u][v]["fuel"] for u, v in zip(path, path[1:]))
-    return distance, time_hours, cost, fuel
+def best_route(G: nx.Graph, source: int, target: int, k: int = 3,
+               deadline_hours: Optional[float] = None) -> Optional[dict]:
+    """
+    The cheapest route that meets the deadline; if none can, the fastest route
+    (so callers can report the true best-case time).
 
-
-def best_route(G: nx.Graph, source: str, target: str, k: int = 3) -> Optional[dict]:
-    """Lowest-cost route among the k Yen candidates, with its metrics."""
+    Equivalent to scoring Yen's K cheapest paths plus the minimum-time path, but
+    evaluated lazily because Yen's algorithm is the expensive part on a
+    country-scale graph:
+      1. Yen's 1st path *is* the cheapest path - if it meets the deadline it wins.
+      2. If even the minimum-time path misses the deadline, nothing can: stop.
+      3. Otherwise search Yen's K cheapest for one that meets the deadline,
+         falling back to the minimum-time path.
+    """
     if source == target:
-        return {"path": [source], "distance_km": 0.0, "time_hours": 0.0, "edge_cost": 0.0, "fuel": 0.0}
-    candidates = k_shortest_paths(G, source, target, k=k)
-    if not candidates:
+        return {"path": [source], **path_metrics(G, [source]), "candidates": 1}
+    try:
+        cheapest = nx.dijkstra_path(G, source, target, weight="weight")
+    except (nx.NetworkXNoPath, nx.NodeNotFound):
         return None
-    best = min(candidates, key=lambda p: path_metrics(G, p)[2])
-    distance, time_hours, cost, fuel = path_metrics(G, best)
-    return {"path": best, "distance_km": distance, "time_hours": time_hours, "edge_cost": cost, "fuel": fuel}
+    m = path_metrics(G, cheapest)
+    if deadline_hours is None or m["time_hours"] <= deadline_hours:
+        return {"path": cheapest, **m, "candidates": 1}
+    fastest = nx.dijkstra_path(G, source, target, weight="time")
+    fm = path_metrics(G, fastest)
+    if fm["time_hours"] > deadline_hours:
+        return {"path": fastest, **fm, "candidates": 2}
+    scored = [(p, path_metrics(G, p)) for p in k_shortest_paths(G, source, target, k)]
+    ok = [x for x in scored if x[1]["time_hours"] <= deadline_hours]
+    path, mm = min(ok, key=lambda x: x[1]["edge_cost"]) if ok else (fastest, fm)
+    if ok and fm["edge_cost"] < mm["edge_cost"]:
+        path, mm = fastest, fm
+    return {"path": path, **mm, "candidates": len(scored) + 1}
 
 
-def held_karp_tsp(G: nx.Graph, start: str, stops: List[str]) -> Optional[dict]:
+def held_karp_tsp(G: nx.Graph, start: int, stops: List[int]) -> Optional[dict]:
     """
-    Exact TSP over an open path: start at `start`, visit every node in
-    `stops` exactly once, minimizing total edge-weight cost. Distance
-    between any two points is their shortest-path cost in G (stops need
-    not be directly connected). Exact and fine for the small number of
-    candidate warehouses expected in a demo (roughly <= 12 stops).
+    Exact open-path TSP: begin at ``start`` and visit every stop once, minimising
+    routing cost. Pairwise distances are shortest-path costs in G.
+    O(n^2 2^n); intended for the handful of warehouses a single vehicle visits.
     """
-    stops = [s for s in stops if s != start]
+    stops = list(dict.fromkeys(s for s in stops if s != start))
     if not stops:
-        return {"visit_order": [start], "path": [start], "distance_km": 0.0,
-                "time_hours": 0.0, "edge_cost": 0.0, "fuel": 0.0}
+        return {"visit_order": [start], "path": [start], "edge_cost": 0.0}
+    pts = [start] + stops
+    n = len(pts)
 
-    all_points = [start] + stops
-    n = len(all_points)
-
-    pair_cost, pair_path = {}, {}
+    pair_cost: Dict[tuple, float] = {}
+    pair_path: Dict[tuple, List[int]] = {}
     for i in range(n):
+        lengths, paths = nx.single_source_dijkstra(G, pts[i], weight="weight")
         for j in range(n):
             if i == j:
                 continue
-            a, b = all_points[i], all_points[j]
-            try:
-                path = nx.shortest_path(G, a, b, weight="weight")
-            except (nx.NetworkXNoPath, nx.NodeNotFound):
+            if pts[j] not in lengths:
                 return None
-            pair_path[(i, j)] = path
-            pair_cost[(i, j)] = path_metrics(G, path)[2]
+            pair_cost[(i, j)] = lengths[pts[j]]
+            pair_path[(i, j)] = paths[pts[j]]
 
-    stop_idx = list(range(1, n))
-    dp = {}
-    for j in stop_idx:
-        dp[(frozenset([j]), j)] = (pair_cost[(0, j)], 0)
-
-    for size in range(2, len(stop_idx) + 1):
-        for subset in combinations(stop_idx, size):
-            subset_fs = frozenset(subset)
+    idx = list(range(1, n))
+    dp: Dict[tuple, tuple] = {(frozenset([j]), j): (pair_cost[(0, j)], 0) for j in idx}
+    for size in range(2, len(idx) + 1):
+        for subset in combinations(idx, size):
+            fs = frozenset(subset)
             for j in subset:
-                prev_subset = subset_fs - {j}
-                best = None
-                for k_ in prev_subset:
-                    if (prev_subset, k_) not in dp:
-                        continue
-                    prev_cost, _ = dp[(prev_subset, k_)]
-                    cand = prev_cost + pair_cost[(k_, j)]
-                    if best is None or cand < best[0]:
-                        best = (cand, k_)
+                prev = fs - {j}
+                best = min(((dp[(prev, k)][0] + pair_cost[(k, j)], k) for k in prev), default=None)
                 if best:
-                    dp[(subset_fs, j)] = best
-
-    full_set = frozenset(stop_idx)
-    best_end = None
-    for j in stop_idx:
-        if (full_set, j) in dp:
-            cost, _ = dp[(full_set, j)]
-            if best_end is None or cost < best_end[0]:
-                best_end = (cost, j)
-    if best_end is None:
-        return None
-
-    cost, last = best_end
-    order, subset = [last], full_set
+                    dp[(fs, j)] = best
+    full = frozenset(idx)
+    cost, last = min((dp[(full, j)][0], j) for j in idx)
+    order, subset = [last], full
     while len(subset) > 1:
-        _, prev = dp[(subset, last)]
+        prev = dp[(subset, last)][1]
         order.append(prev)
-        subset = subset - {last}
-        last = prev
+        subset, last = subset - {last}, prev
     order.reverse()
 
-    visit_order = [all_points[0]] + [all_points[i] for i in order]
-    full_path = [visit_order[0]]
-    total_distance = total_time = total_fuel = 0.0
-    for a, b in zip(visit_order, visit_order[1:]):
-        ia, ib = all_points.index(a), all_points.index(b)
-        seg = pair_path[(ia, ib)]
-        full_path.extend(seg[1:])
-        d, t, c, f = path_metrics(G, seg)
-        total_distance += d
-        total_time += t
-        total_fuel += f
-
-    return {
-        "visit_order": visit_order,
-        "path": full_path,
-        "distance_km": total_distance,
-        "time_hours": total_time,
-        "edge_cost": cost,
-        "fuel": total_fuel,
-    }
+    visit = [0] + order
+    path = [pts[0]]
+    for a, b in zip(visit, visit[1:]):
+        path.extend(pair_path[(a, b)][1:])
+    return {"visit_order": [pts[i] for i in visit], "path": path, "edge_cost": cost}

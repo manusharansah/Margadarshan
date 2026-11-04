@@ -1,0 +1,230 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  MargaAI Nepal - ECS Fargate (frontend + API in one task), RDS PostgreSQL for warehouse
+  inventory, S3 bucket for the prebuilt road-network artifact, public ALB.
+
+Parameters:
+  VpcId: { Type: AWS::EC2::VPC::Id }
+  PublicSubnetIds: { Type: List<AWS::EC2::Subnet::Id>, Description: At least two subnets in different AZs with internet access }
+  FrontendImage: { Type: String, Description: "ECR image URI for the frontend, e.g. 123.dkr.ecr.ap-south-1.amazonaws.com/marga-frontend:sha" }
+  BackendImage: { Type: String, Description: ECR image URI for the API }
+  CertificateArn: { Type: String, Default: "", Description: Optional ACM certificate ARN; enables HTTPS and redirects HTTP }
+  GemmaApiKey: { Type: String, Default: "", NoEcho: true, Description: Optional Google AI Studio key; empty = rule-based explanations }
+  DesiredCount: { Type: Number, Default: 1, MinValue: 1 }
+  DbInstanceClass: { Type: String, Default: db.t4g.micro }
+
+Conditions:
+  HasCert: !Not [!Equals [!Ref CertificateArn, ""]]
+  HasGemma: !Not [!Equals [!Ref GemmaApiKey, ""]]
+
+Resources:
+  DataBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption: { ServerSideEncryptionConfiguration: [{ ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 } }] }
+      PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true }
+      VersioningConfiguration: { Status: Enabled }
+
+  AdminKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: X-API-Key for warehouse write endpoints
+      GenerateSecretString: { PasswordLength: 40, ExcludePunctuation: true }
+
+  GemmaSecret:
+    Type: AWS::SecretsManager::Secret
+    Condition: HasGemma
+    Properties:
+      SecretString: !Ref GemmaApiKey
+
+  DbSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"marga"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludePunctuation: true
+
+  AlbSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public ALB
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0 }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0 }
+
+  TaskSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Fargate tasks (only the ALB may reach the frontend)
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 3000, ToPort: 3000, SourceSecurityGroupId: !Ref AlbSg }
+
+  DbSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: PostgreSQL (tasks only)
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 5432, ToPort: 5432, SourceSecurityGroupId: !Ref TaskSg }
+
+  DbSubnets:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Marga DB
+      SubnetIds: !Ref PublicSubnetIds
+
+  Db:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      Engine: postgres
+      DBInstanceClass: !Ref DbInstanceClass
+      AllocatedStorage: "20"
+      StorageEncrypted: true
+      DBName: marga
+      MasterUsername: !Sub "{{resolve:secretsmanager:${DbSecret}:SecretString:username}}"
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DbSecret}:SecretString:password}}"
+      DBSubnetGroupName: !Ref DbSubnets
+      VPCSecurityGroups: [!Ref DbSg]
+      PubliclyAccessible: false
+      BackupRetentionPeriod: 7
+
+  Logs:
+    Type: AWS::Logs::LogGroup
+    Properties: { RetentionInDays: 30 }
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{ Effect: Allow, Principal: { Service: ecs-tasks.amazonaws.com }, Action: "sts:AssumeRole" }]
+      ManagedPolicyArns: ["arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"]
+      Policies:
+        - PolicyName: read-secrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: [!Ref AdminKeySecret, !Ref DbSecret, !If [HasGemma, !Ref GemmaSecret, !Ref "AWS::NoValue"]]
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{ Effect: Allow, Principal: { Service: ecs-tasks.amazonaws.com }, Action: "sts:AssumeRole" }]
+      Policies:
+        - PolicyName: read-network-artifact
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement: [{ Effect: Allow, Action: "s3:GetObject", Resource: !Sub "${DataBucket.Arn}/*" }]
+
+  TaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: marga
+      Cpu: "1024"
+      Memory: "3072"
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: backend
+          Image: !Ref BackendImage
+          Essential: true
+          PortMappings: [{ ContainerPort: 8000 }]
+          Environment:
+            - { Name: MARGA_NETWORK_S3_URI, Value: !Sub "s3://${DataBucket}/network.json.gz" }
+            - { Name: DB_HOST, Value: !GetAtt Db.Endpoint.Address }
+            - { Name: CORS_ORIGINS, Value: "" }
+          Secrets:
+            - { Name: MARGA_ADMIN_API_KEY, ValueFrom: !Ref AdminKeySecret }
+            - { Name: DB_PASSWORD, ValueFrom: !Sub "${DbSecret}:password::" }
+            - { Name: DB_USER, ValueFrom: !Sub "${DbSecret}:username::" }
+            - !If [HasGemma, { Name: GEMMA_API_KEY, ValueFrom: !Ref GemmaSecret }, !Ref "AWS::NoValue"]
+          Command:
+            - sh
+            - -c
+            - >-
+              export DATABASE_URL="postgresql+psycopg://$DB_USER:$DB_PASSWORD@$DB_HOST:5432/marga" &&
+              python -m gis_backend.fetch_artifact &&
+              exec uvicorn gis_backend.api:app --host 127.0.0.1 --port 8000 --proxy-headers
+          LogConfiguration: { LogDriver: awslogs, Options: { awslogs-group: !Ref Logs, awslogs-region: !Ref "AWS::Region", awslogs-stream-prefix: backend } }
+        - Name: frontend
+          Image: !Ref FrontendImage
+          Essential: true
+          PortMappings: [{ ContainerPort: 3000 }]
+          Environment: [{ Name: GIS_API_BASE, Value: "http://127.0.0.1:8000" }]
+          DependsOn: [{ ContainerName: backend, Condition: START }]
+          LogConfiguration: { LogDriver: awslogs, Options: { awslogs-group: !Ref Logs, awslogs-region: !Ref "AWS::Region", awslogs-stream-prefix: frontend } }
+
+  Alb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties: { Scheme: internet-facing, Subnets: !Ref PublicSubnetIds, SecurityGroups: [!Ref AlbSg] }
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Port: 3000
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: /api/health
+      HealthCheckIntervalSeconds: 30
+      Matcher: { HttpCode: "200" }
+
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref Alb
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - !If
+          - HasCert
+          - { Type: redirect, RedirectConfig: { Protocol: HTTPS, Port: "443", StatusCode: HTTP_301 } }
+          - { Type: forward, TargetGroupArn: !Ref TargetGroup }
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: HasCert
+    Properties:
+      LoadBalancerArn: !Ref Alb
+      Port: 443
+      Protocol: HTTPS
+      Certificates: [{ CertificateArn: !Ref CertificateArn }]
+      DefaultActions: [{ Type: forward, TargetGroupArn: !Ref TargetGroup }]
+
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn: [HttpListener]
+    Properties:
+      Cluster: !Ref Cluster
+      LaunchType: FARGATE
+      DesiredCount: !Ref DesiredCount
+      TaskDefinition: !Ref TaskDef
+      HealthCheckGracePeriodSeconds: 180
+      DeploymentConfiguration: { DeploymentCircuitBreaker: { Enable: true, Rollback: true } }
+      NetworkConfiguration:
+        AwsvpcConfiguration: { AssignPublicIp: ENABLED, Subnets: !Ref PublicSubnetIds, SecurityGroups: [!Ref TaskSg] }
+      LoadBalancers: [{ ContainerName: frontend, ContainerPort: 3000, TargetGroupArn: !Ref TargetGroup }]
+
+Outputs:
+  Url: { Value: !Sub "http://${Alb.DNSName}" }
+  DataBucketName: { Value: !Ref DataBucket, Description: Upload network.json.gz here }
+  AdminKeySecretArn: { Value: !Ref AdminKeySecret }
+  ClusterName: { Value: !Ref Cluster }
+  ServiceName: { Value: !GetAtt Service.Name }

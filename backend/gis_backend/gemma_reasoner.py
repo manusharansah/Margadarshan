@@ -1,309 +1,197 @@
 """
-Gemma 4 reasoning layer (workflow doc, Section 6).
+Reasoning layer (workflow doc, section 6).
 
-Gemma is never used to compute totals -- units, time, edge cost, and fuel
-are always produced deterministically upstream (source_selector.py,
-feasibility.py). Gemma's job is limited to:
-  (a) selecting the best plan among the already-feasible candidates, and
-  (b) explaining that choice in plain language, or explaining why no
-      feasible plan exists.
+Gemma never computes numbers. Units, time, cost, fuel and deadline feasibility
+are fixed upstream; the reasoner only (a) chooses among plans that already meet
+the deadline and (b) explains the outcome in plain language.
 
-Two implementations:
-  - MockGemmaReasoner: deterministic, offline stand-in used when no
-    GEMMA_API_KEY is configured -- lets the rest of the backend be built
-    and demoed without a Gemma API key.
-  - LiveGemmaReasoner: calls Gemma via Google AI Studio's Generative
-    Language API (a single API key, no GCP project needed). See its
-    docstring below for setup.
+Two implementations, both explicit and both labelled in the API response:
+
+``LiveGemmaReasoner``
+    Calls Gemma via Google AI Studio's Generative Language API (one API key).
+``DeterministicReasoner``
+    Applies the documented selection policy and writes a templated explanation
+    from the computed figures. Used when Gemma is not configured or fails; the
+    response says ``explanation_source: "deterministic"`` so it is never passed
+    off as model output.
 """
+from __future__ import annotations
+
 import json
 import os
-from dataclasses import asdict
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import Callable, List, Optional
 
 import requests
 
 from .models import CandidatePlan, DeliveryRequest
 
+PLAN_LABEL = {
+    "single_source": "a single warehouse",
+    "multi_source_parallel": "several warehouses shipping in parallel",
+    "single_vehicle_multistop": "one vehicle collecting from several warehouses",
+}
 
-def _plan_summary(plan: CandidatePlan) -> dict:
+
+@dataclass
+class Selection:
+    index: Optional[int]
+    explanation: str
+    source: str  # "gemma" | "deterministic"
+
+
+def compact(plan: CandidatePlan, name: Callable[[str], str]) -> dict:
+    """Prompt/UI-sized summary: figures only, no geometry."""
     return {
         "plan_type": plan.plan_type,
-        "sources_used": plan.sources_used,
-        "vehicles_used": plan.vehicles_used,
-        "total_units": plan.total_units,
-        "total_time_hours": round(plan.total_time_hours, 2),
-        "total_edge_cost": round(plan.total_edge_cost, 2),
-        "fuel_estimate": round(plan.fuel_estimate, 2),
-        # Needed by the frontend map to draw the actual route geometry for
-        # this plan -- without this the UI can only show source/destination
-        # markers, not the path between them.
-        "legs": [asdict(leg) for leg in plan.legs],
+        "sources": [name(s) for s in plan.sources_used],
+        "vehicles": plan.vehicles_used,
+        "units": plan.total_units,
+        "arrival_hours": round(plan.total_time_hours, 2),
+        "route_cost": round(plan.total_edge_cost, 1),
+        "fuel_litres": round(plan.fuel_litres, 1),
+        "distance_km": round(plan.distance_km, 1),
+        "worst_hazard_0_to_1": round(max((l.max_hazard for l in plan.legs), default=0.0), 2),
+        "legs": [{"from": name(l.source), "units": l.units_carried,
+                  "hours": round(l.time_hours, 2), "km": round(l.distance_km, 1)} for l in plan.legs],
     }
 
 
-class GemmaReasoner:
-    def select_and_explain(self, request: DeliveryRequest, plans: List[CandidatePlan]) -> dict:
+class Reasoner:
+    name = "base"
+
+    def explain(self, request: DeliveryRequest, plans: List[CandidatePlan], feasible: bool,
+                name: Callable[[str], str]) -> Selection:
         raise NotImplementedError
 
 
-class MockGemmaReasoner(GemmaReasoner):
-    """
-    Applies the same selection policy Gemma is expected to apply: among
-    plans that meet the deadline, prefer the fewest sources/vehicles;
-    break ties on lower total edge cost. If nothing meets the deadline,
-    report infeasibility with the reason, per the finalized workflow.
-    """
+class DeterministicReasoner(Reasoner):
+    name = "deterministic"
 
-    def select_and_explain(self, request: DeliveryRequest, plans: List[CandidatePlan]) -> dict:
-        feasible = [p for p in plans if p.total_time_hours <= request.deadline_hours]
-
+    def explain(self, request, plans, feasible, name):
+        q, d = request.quantity, request.deadline_hours
         if not feasible:
-            if plans:
-                best_case = min(p.total_time_hours for p in plans)
-                reason = (
-                    f"The fastest possible plan found still takes {best_case:.1f}h, "
-                    f"which exceeds the {request.deadline_hours}h deadline."
-                )
+            if not plans:
+                why = "no combination of warehouses has enough stock and vehicles to supply that quantity."
             else:
-                reason = "No combination of warehouses in the network can supply the requested quantity at all."
-            return {
-                "status": "infeasible",
-                "explanation": (
-                    f"Cannot deliver {request.quantity} units to {request.destination} "
-                    f"within {request.deadline_hours} hours. {reason}"
-                ),
-                "chosen_plan": None,
-                "chosen_plan_object": None,
-                "rejected_plans": [_plan_summary(p) for p in plans],
-            }
-
-        chosen = min(feasible, key=lambda p: (len(p.sources_used), p.total_edge_cost))
-        rejected = [p for p in feasible if p is not chosen]
-
-        lines = [
-            f"Recommended: {chosen.plan_type.replace('_', ' ')} using "
-            f"{len(chosen.sources_used)} source(s) ({', '.join(chosen.sources_used)}) "
-            f"and {chosen.vehicles_used} vehicle(s).",
-            f"Arrives in {chosen.total_time_hours:.1f}h, within the {request.deadline_hours}h deadline.",
-        ]
-        if rejected:
-            fewer = min(rejected, key=lambda p: len(p.sources_used))
-            lines.append(
-                f"Other feasible plans needed {len(fewer.sources_used)}+ source(s) or more "
-                f"vehicles without a meaningful time or cost advantage, so this one was preferred."
-            )
-
-        return {
-            "status": "feasible",
-            "explanation": " ".join(lines),
-            "chosen_plan": _plan_summary(chosen),
-            "chosen_plan_object": chosen,
-            "rejected_plans": [_plan_summary(p) for p in rejected],
-        }
-
-
-class LiveGemmaReasoner(GemmaReasoner):
-    """
-    Wired up for Google AI Studio (the Generative Language API), since that's
-    where this project's Gemma access lives. Auth is a single API key -- no
-    GCP project/service account needed (that would be the Vertex AI path
-    instead, which uses a different endpoint/auth shape).
-
-    Get a key at https://aistudio.google.com/apikey, then:
-      export GEMMA_API_KEY="..."
-      export GEMMA_MODEL="gemma-4-26b-a4b-it"   # override if you want a
-                                                  # different size -- see below
-
-    Gemma 4 model ids available on AI Studio (pick based on latency/quality
-    tradeoff; all support generateContent the same way):
-      gemma-4-26b-a4b-it   -- default here; lower latency, good general use
-      gemma-4-31b-it        -- larger, stronger reasoning
-      gemma-4-12b-it
-      gemma-4-e4b-it
-      gemma-4-e2b-it         -- smallest/fastest
-    Confirm which of these your specific key has access to in AI Studio --
-    availability can vary by account/region.
-    """
-
-    DEFAULT_ENDPOINT_TEMPLATE = (
-        "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-    )
-    DEFAULT_MODEL = "gemma-4-26b-a4b-it"
-
-    def __init__(
-        self,
-        api_key: Optional[str] = None,
-        model: Optional[str] = None,
-        endpoint_template: Optional[str] = None,
-        timeout: float = 20.0,
-    ):
-        self.api_key = api_key or os.environ.get("GEMMA_API_KEY")
-        self.model = model or os.environ.get("GEMMA_MODEL", self.DEFAULT_MODEL)
-        self.endpoint_template = (
-            endpoint_template or os.environ.get("GEMMA_ENDPOINT", self.DEFAULT_ENDPOINT_TEMPLATE)
+                best = min(plans, key=lambda p: p.total_time_hours)
+                why = (f"the fastest plan found ({PLAN_LABEL[best.plan_type]}) needs {best.total_time_hours:.1f} h, "
+                       f"which is {best.total_time_hours - d:.1f} h over the {d:g} h deadline.")
+            return Selection(None, f"{q} units cannot reach {request.destination_name} within {d:g} h: {why}", "deterministic")
+        p = plans[0]
+        srcs = ", ".join(name(s) for s in p.sources_used)
+        text = (
+            f"Recommended: {PLAN_LABEL[p.plan_type]} ({srcs}) with {p.vehicles_used} vehicle(s). "
+            f"It arrives in {p.total_time_hours:.1f} h, {d - p.total_time_hours:.1f} h inside the {d:g} h deadline, "
+            f"over {p.distance_km:.0f} km using about {p.fuel_litres:.0f} L of fuel. "
         )
-        self.timeout = timeout
+        hz = max((l.max_hazard for l in p.legs), default=0.0)
+        text += f"The most exposed stretch has a hazard index of {hz:.2f} (0 = safe, 1 = severe). "
+        if len(plans) > 1:
+            text += (f"{len(plans) - 1} other plan(s) also meet the deadline; this one was ranked first for needing "
+                     "the fewest warehouses and vehicles, then the lowest terrain/hazard-weighted route cost.")
+        return Selection(0, text, "deterministic")
 
-    def select_and_explain(self, request: DeliveryRequest, plans: List[CandidatePlan]) -> dict:
-        if not self.api_key:
-            raise RuntimeError(
-                "No GEMMA_API_KEY configured. Get one from https://aistudio.google.com/apikey, "
-                "set it as an env var, or use MockGemmaReasoner for local development."
-            )
-        prompt = self._build_prompt(request, plans)
-        raw = self._call_gemma(prompt)
-        return self._parse_response(raw, plans)
 
-    # Gemma (unlike Gemini) ignores a bare responseMimeType="application/json" --
-    # it still emits its markdown "thinking" before any JSON, which is exactly
-    # what was breaking parsing. Pairing responseMimeType with a full
-    # responseSchema (and, for extra safety, responseJsonSchema) is what
-    # actually suppresses that and forces clean JSON-only output.
+class LiveGemmaReasoner(Reasoner):
+    """Google AI Studio (Generative Language API). Needs ``GEMMA_API_KEY``."""
+
+    name = "gemma"
+    ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    DEFAULT_MODEL = "gemma-4-26b-a4b-it"
     RESPONSE_SCHEMA = {
         "type": "object",
-        "properties": {
-            "status": {"type": "string", "enum": ["feasible", "infeasible"]},
-            # responseJsonSchema follows real JSON Schema, not OpenAPI --
-            # there's no "nullable" keyword there, so int-or-null is
-            # expressed as a type array instead.
-            "chosen_index": {"type": ["integer", "null"]},
-            "explanation": {"type": "string"},
-        },
-        "required": ["status", "chosen_index", "explanation"],
+        "properties": {"chosen_index": {"type": ["integer", "null"]}, "explanation": {"type": "string"}},
+        "required": ["chosen_index", "explanation"],
     }
 
-    def _build_prompt(self, request: DeliveryRequest, plans: List[CandidatePlan]) -> str:
-        return (
-            "You are choosing the best delivery plan for a logistics order in Nepal. "
-            "You are given only precomputed, verified plan summaries -- do not recompute "
-            "or second-guess the numbers, only reason over them.\n\n"
-            f"Order: deliver {request.quantity} units to {request.destination} "
-            f"within {request.deadline_hours} hours.\n\n"
-            f"Candidate plans (0-indexed):\n{json.dumps([_plan_summary(p) for p in plans], indent=2)}\n\n"
-            "Pick the best feasible plan (meets the deadline; prefer fewer sources/vehicles "
-            "when the time/cost difference is small). If none are feasible, say so and explain "
-            "why.\n\n"
-            "Output rules (critical): do not think out loud, do not use bullet points or "
-            "markdown, do not restate the input, do not write any text before or after the "
-            "JSON. Your entire response must be exactly one JSON object, and nothing else, "
-            "in this shape: "
-            '{"status": "feasible"|"infeasible", "chosen_index": int|null, "explanation": string}'
-        )
+    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None,
+                 endpoint: Optional[str] = None, timeout: float = 30.0,
+                 session: Optional[requests.Session] = None):
+        self.api_key = api_key or os.environ.get("GEMMA_API_KEY")
+        self.model = model or os.environ.get("GEMMA_MODEL", self.DEFAULT_MODEL)
+        self.endpoint = endpoint or os.environ.get("GEMMA_ENDPOINT", self.ENDPOINT)
+        self.timeout = timeout
+        self._session = session or requests.Session()
 
-    def _call_gemma(self, prompt: str) -> str:
-        url = self.endpoint_template.format(model=self.model)
-        body = {
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": 0.1,
-                "responseMimeType": "application/json",
-                # responseJsonSchema (not the older responseSchema -- the two
-                # are mutually exclusive and sending both risks a 400) is what
-                # actually stops Gemma from "thinking" in markdown before
-                # producing JSON. responseMimeType alone is not enough for
-                # Gemma models, even though it's sufficient for Gemini.
-                "responseJsonSchema": self.RESPONSE_SCHEMA,
-            },
-        }
-        try:
-            resp = requests.post(url, params={"key": self.api_key}, json=body, timeout=self.timeout)
-            resp.raise_for_status()
-        except requests.RequestException as exc:
-            raise RuntimeError(f"Gemma API call failed: {exc}") from exc
+    @property
+    def configured(self) -> bool:
+        return bool(self.api_key)
 
-        data = resp.json()
-        try:
-            return data["candidates"][0]["content"]["parts"][0]["text"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise RuntimeError(f"Unexpected Gemma response shape: {data}") from exc
+    def explain(self, request, plans, feasible, name):
+        if not self.api_key:
+            raise RuntimeError("GEMMA_API_KEY is not set")
+        prompt = self._prompt(request, plans, feasible, name)
+        data = self._parse(self._call(prompt))
+        idx = data.get("chosen_index")
+        explanation = str(data.get("explanation", "")).strip()
+        if not explanation:
+            raise RuntimeError("Gemma returned an empty explanation")
+        if feasible and (not isinstance(idx, int) or not 0 <= idx < len(plans)):
+            raise RuntimeError(f"Gemma returned invalid chosen_index {idx!r} for {len(plans)} plans")
+        return Selection(idx if feasible else None, explanation, "gemma")
 
     @staticmethod
-    def _try_parse_json(text: str) -> Optional[dict]:
-        """
-        Direct parse first. If Gemma still prepended markdown "thinking"
-        before the JSON despite the schema constraints, fall back to
-        pulling out the last balanced {...} block in the text -- Gemma's
-        actual answer, when it produces one, comes last.
-        """
+    def _prompt(request, plans, feasible, name) -> str:
+        body = json.dumps([compact(p, name) for p in plans], indent=1)
+        task = (
+            "Every plan below already meets the deadline. Choose the best one (index into the list). Prefer fewer "
+            "warehouses and vehicles unless another plan is clearly safer (lower hazard) or cheaper."
+            if feasible else
+            "No plan meets the deadline. Set chosen_index to null and explain, using only the figures given, why the "
+            "order cannot be fulfilled and what would have to change (deadline, quantity)."
+        )
+        return (
+            "You advise a dealer-delivery planner in Nepal's hills. All numbers are precomputed and verified: do not "
+            "recompute or alter them; reason only over what is given. Write the explanation in 2-4 plain sentences "
+            "for a non-technical dealer.\n\n"
+            f"Order: {request.quantity} units to {request.destination_name} within {request.deadline_hours:g} hours.\n"
+            f"Plans (0-indexed): {body}\n\n{task}\n"
+            'Respond with exactly one JSON object: {"chosen_index": int|null, "explanation": string}'
+        )
+
+    def _call(self, prompt: str) -> str:
+        body = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json",
+                                 "responseJsonSchema": self.RESPONSE_SCHEMA},
+        }
+        try:
+            r = self._session.post(self.endpoint.format(model=self.model), params={"key": self.api_key},
+                                   json=body, timeout=self.timeout)
+            r.raise_for_status()
+            return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+        except requests.RequestException as exc:
+            # Never echo the request URL (it carries the API key).
+            raise RuntimeError(f"Gemma API call failed: {type(exc).__name__}") from None
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise RuntimeError("Unexpected Gemma response shape") from exc
+
+    @staticmethod
+    def _parse(raw: str) -> dict:
+        text = raw.strip()
+        if text.startswith("```"):
+            text = text.strip("`").removeprefix("json").strip()
         try:
             return json.loads(text)
         except json.JSONDecodeError:
             pass
-
-        # Scan for balanced brace blocks and try the last one that parses,
-        # since the final block is most likely to be the intended answer
-        # rather than a fragment mentioned while reasoning.
-        candidates = []
-        depth = 0
-        start = None
-        for i, ch in enumerate(text):
+        depth, start, blocks = 0, None, []
+        for i, ch in enumerate(text):  # fall back to the last balanced {...} block
             if ch == "{":
-                if depth == 0:
-                    start = i
-                depth += 1
-            elif ch == "}":
-                if depth > 0:
-                    depth -= 1
-                    if depth == 0 and start is not None:
-                        candidates.append(text[start:i + 1])
-
-        for candidate in reversed(candidates):
+                start, depth = (i if depth == 0 else start), depth + 1
+            elif ch == "}" and depth:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    blocks.append(text[start:i + 1])
+        for b in reversed(blocks):
             try:
-                return json.loads(candidate)
+                return json.loads(b)
             except json.JSONDecodeError:
                 continue
-        return None
-
-    def _parse_response(self, raw: str, plans: List[CandidatePlan]) -> dict:
-        text = raw.strip()
-        # Defensive: strip markdown code fences if the model added them
-        # despite responseMimeType=application/json.
-        if text.startswith("```"):
-            text = text.strip("`")
-            if text.lower().startswith("json"):
-                text = text[4:]
-            text = text.strip()
-
-        data = self._try_parse_json(text)
-        if data is None:
-            raise RuntimeError(f"Gemma did not return valid JSON: {raw!r}")
-
-        status = data.get("status")
-        if status not in ("feasible", "infeasible"):
-            raise RuntimeError(f"Gemma returned an unexpected status field: {data!r}")
-
-        idx = data.get("chosen_index")
-        chosen = None
-        if status == "feasible":
-            if not isinstance(idx, int) or not (0 <= idx < len(plans)):
-                raise RuntimeError(
-                    f"Gemma returned status='feasible' with an invalid chosen_index={idx!r} "
-                    f"for {len(plans)} candidate plan(s) -- refusing to guess."
-                )
-            chosen = plans[idx]
-
-        return {
-            "status": status,
-            "explanation": data.get("explanation", ""),
-            "chosen_plan": _plan_summary(chosen) if chosen else None,
-            "chosen_plan_object": chosen,
-            "rejected_plans": [_plan_summary(p) for p in plans if p is not chosen],
-        }
+        raise RuntimeError("Gemma did not return valid JSON")
 
 
-def get_reasoner() -> GemmaReasoner:
-    """
-    Always resolves to the live Gemma reasoner -- there is no automatic
-    fallback to MockGemmaReasoner here. If GEMMA_API_KEY isn't set,
-    LiveGemmaReasoner.select_and_explain will raise a clear error on first
-    use, which service.process_request catches and reports as an honest
-    "reasoning_unavailable" result rather than silently substituting a
-    rule-based guess dressed up as Gemma's answer.
-
-    MockGemmaReasoner still exists and is useful, but only when a caller
-    explicitly opts into it (e.g. `process_request(..., reasoner=MockGemmaReasoner())`
-    in demo.py or tests, clearly labeled as a stand-in) -- never as an
-    implicit default.
-    """
-    return LiveGemmaReasoner()
+def get_reasoner() -> Reasoner:
+    live = LiveGemmaReasoner()
+    return live if live.configured else DeterministicReasoner()

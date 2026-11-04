@@ -1,7 +1,4 @@
-"""
-Deterministic feasibility checks (workflow doc, Step 5). Everything here
-is plain arithmetic, computed in code before any plan is handed to Gemma.
-"""
+"""Deterministic feasibility arithmetic (plain integer math; never delegated to an LLM)."""
 import math
 
 from .models import StorageNode
