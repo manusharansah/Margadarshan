@@ -101,10 +101,11 @@ def best_route(G: nx.Graph, source: int, target: int, k: int = 3,
     return {"path": path, **mm, "candidates": len(scored) + 1}
 
 
-def held_karp_tsp(G: nx.Graph, start: int, stops: List[int]) -> Optional[dict]:
+def held_karp_tsp(G: nx.Graph, start: int, stops: List[int], sssp=None) -> Optional[dict]:
     """
     Exact open-path TSP: begin at ``start`` and visit every stop once, minimising
-    routing cost. Pairwise distances are shortest-path costs in G.
+    routing cost. Pairwise distances are shortest-path costs in G (``sssp(node)`` may supply cached
+    single-source Dijkstra results).
     O(n^2 2^n); intended for the handful of warehouses a single vehicle visits.
     """
     stops = list(dict.fromkeys(s for s in stops if s != start))
@@ -116,7 +117,7 @@ def held_karp_tsp(G: nx.Graph, start: int, stops: List[int]) -> Optional[dict]:
     pair_cost: Dict[tuple, float] = {}
     pair_path: Dict[tuple, List[int]] = {}
     for i in range(n):
-        lengths, paths = nx.single_source_dijkstra(G, pts[i], weight="weight")
+        lengths, paths = sssp(pts[i]) if sssp else nx.single_source_dijkstra(G, pts[i], weight="weight")
         for j in range(n):
             if i == j:
                 continue

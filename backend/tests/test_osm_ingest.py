@@ -132,3 +132,35 @@ def test_sparse_way_gets_virtual_nodes_so_snapping_stays_precise():
     assert all(haversine_km(p.coords[0], p.coords[-1]) <= 0.51 for p in pieces)
     ids = [p.nodes[0] for p in pieces] + [pieces[-1].nodes[-1]]
     assert ids[0] == 1 and ids[-1] == 2 and all(i < 0 for i in ids[1:-1]) and len(set(ids)) == len(ids)
+
+
+def test_division_places_use_english_names_and_drop_wards():
+    from shapely import to_wkb
+    from shapely.geometry import Point
+
+    from gis_backend.overture import division_places
+
+    def row(i, primary, en, subtype="locality", cls=None, lng=85.5, lat=27.6):
+        names = {"primary": primary, "common": [("ne", primary)] + ([("en", en)] if en else [])}
+        return {"id": i, "names": names, "subtype": subtype, "class": cls, "geometry": to_wkb(Point(lng, lat))}
+
+    rows = [row("a", "बनेपा नगरपालिका", "Banepa"), row("b", "Kathmandu-16", None, "neighborhood"),
+            row("c", "धुलिखेल", None, "locality", "town"), row("d", "x", "Somewhere", "region")]
+    out = division_places(rows)
+    assert [p["name"] for p in out] == ["Banepa", "धुलिखेल"]            # ward and non-place subtype dropped
+    assert out[0]["name_local"] == "बनेपा नगरपालिका" and out[0]["kind"] == "municipality" and out[1]["kind"] == "town"
+
+
+def test_place_search_matches_both_scripts_and_ranks_towns_first():
+    from gis_backend.network import Network
+
+    from .helpers import make_artifact
+
+    art = make_artifact([(1, 2, {})], {1: (0, 0), 2: (1, 0)})
+    art["places"] = [
+        {"id": "1", "name": "Banepa Tol", "name_local": "", "lat": 27.6, "lng": 85.5, "kind": "hamlet"},
+        {"id": "2", "name": "Banepa", "name_local": "बनेपा नगरपालिका", "lat": 27.6, "lng": 85.5, "kind": "municipality"},
+        {"id": "3", "name": "Old Banepa Quarter", "name_local": "", "lat": 27.6, "lng": 85.5, "kind": "neighborhood"}]
+    n = Network(art)
+    assert [p["id"] for p in n.search_places("banepa")] == ["2", "1", "3"]   # prefix + rank, then substring
+    assert [p["id"] for p in n.search_places("बनेपा")] == ["2"]              # Devanagari query

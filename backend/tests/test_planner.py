@@ -95,3 +95,24 @@ def test_infeasible_by_deadline_still_reports_best_case(net):
 def test_warehouse_at_destination_has_zero_travel(net):
     (p,) = generate_plans(ctx(net, [wh("HERE", 15, 500, 3)], 100, 1))
     assert p.total_time_hours == 0 and p.distance_km == 0
+
+
+def test_short_stock_exits_before_any_routing(net):
+    c = ctx(net, [wh("A", 0, 100, 2), wh("B", 3, 100, 2)], 1000, 100)
+    assert generate_plans(c) == []
+    assert c._sssp == {} and c._routes == {}      # no shortest-path work was done
+
+
+def test_multistop_refuses_plans_needing_too_many_trips(net):
+    from gis_backend.source_selector import MAX_TRIPS
+    c = ctx(net, [wh("A", 0, 100000, 1)], 200 * (MAX_TRIPS + 1), 1e6)
+    assert multistop_plan(c, "A") is None
+    assert multistop_plan(ctx(net, [wh("A", 0, 100000, 1)], 200 * MAX_TRIPS, 1e6), "A") is not None
+
+
+def test_cached_shortest_path_trees_do_not_change_multistop_results(net):
+    cache = {}
+    a = multistop_plan(ctx(net, [wh("A", 0, 500, 1)], 400, 1000), "A")
+    c2 = PlanContext(net.graph, {"A": wh("A", 0, 500, 1)}, 15, DeliveryRequest(0, 0, 400, 1000), sssp_cache=cache)
+    b, b2 = multistop_plan(c2, "A"), multistop_plan(c2, "A")      # second call is served from the cache
+    assert cache and (a.total_time_hours, a.total_edge_cost) == (b.total_time_hours, b.total_edge_cost) == (b2.total_time_hours, b2.total_edge_cost)

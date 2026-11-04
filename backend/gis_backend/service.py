@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from dataclasses import asdict, replace
 from typing import Callable, Dict, List, Optional
 
@@ -46,6 +47,8 @@ def plan_json(plan: CandidatePlan, with_geometry: bool = True) -> dict:
     return d
 
 
+REMEDY_BUDGET_SECONDS = 8.0   # cap on the quantity search for "largest order that still fits"
+
 REMEDY_SCHEMA = {
     "type": "object",
     "properties": {"proposals": {"type": "array", "maxItems": 3, "items": {
@@ -62,11 +65,12 @@ def _rank(plans: List[CandidatePlan]) -> List[CandidatePlan]:
 
 
 def verify_remedy(network: Network, usable: Dict[str, StorageNode], dest_node: int, req: DeliveryRequest,
-                  nm: Callable[[str], str], source: str, kind: str, rationale: str) -> Optional[dict]:
+                  nm: Callable[[str], str], source: str, kind: str, rationale: str,
+                  cache: Optional[dict] = None) -> Optional[dict]:
     """Run the real planner on an alternative order; return it only if it is genuinely feasible."""
     if req.quantity <= 0 or not (0 < req.deadline_hours <= 720):
         return None
-    best = _rank(generate_plans(PlanContext(network.graph, usable, dest_node, req)))
+    best = _rank(generate_plans(PlanContext(network.graph, usable, dest_node, req, sssp_cache=cache)))
     if not best:
         return None
     p = best[0]
@@ -76,34 +80,41 @@ def verify_remedy(network: Network, usable: Dict[str, StorageNode], dest_node: i
             "verified": True}
 
 
-def computed_remedies(network, usable, dest_node, request, plans, nm) -> List[dict]:
-    """Code-derived options (no AI): a longer deadline, or the largest quantity that fits the deadline."""
+def computed_remedies(network, usable, dest_node, request, plans, nm, cache: Optional[dict] = None) -> List[dict]:
+    """Code-derived options (no AI): a longer deadline, or a smaller quantity that fits the deadline.
+
+    The quantity comes from bisection. Whether an order is deliverable is not strictly monotone in its
+    size (different warehouse combinations apply at different sizes), so the result is a quantity the
+    planner has verified, not a guaranteed maximum."""
     out: List[dict] = []
     if plans:
         h = min(720.0, math.ceil(min(p.total_time_hours for p in plans) * 2) / 2)
         r = verify_remedy(network, usable, dest_node, replace(request, deadline_hours=h), nm, "computed",
-                          "extend_deadline", f"Same {request.quantity} units, deadline moved to {h:g} h.")
+                          "extend_deadline", f"Same {request.quantity} units, deadline moved to {h:g} h.", cache)
         if r:
             out.append(r)
-    lo, hi, best_q = 0, request.quantity - 1, 0
+    lo, hi, best_q = 0, min(request.quantity - 1, sum(w.units_in_stock for w in usable.values())), 0
+    started = time.monotonic()
     for _ in range(8):  # bisection on quantity; every candidate is run through the real planner
-        if hi <= lo:
+        if hi <= lo or time.monotonic() - started > REMEDY_BUDGET_SECONDS:
             break
         mid = (lo + hi + 1) // 2
-        if _rank(generate_plans(PlanContext(network.graph, usable, dest_node, replace(request, quantity=mid)))):
+        if _rank(generate_plans(PlanContext(network.graph, usable, dest_node, replace(request, quantity=mid),
+                                            sssp_cache=cache))):
             lo = best_q = mid
         else:
             hi = mid - 1
     if best_q > 0:
         r = verify_remedy(network, usable, dest_node, replace(request, quantity=best_q), nm, "computed",
                           "reduce_quantity",
-                          f"Ship {best_q} units now within {request.deadline_hours:g} h; {request.quantity - best_q} remain.")
+                          f"Ship {best_q} units now within {request.deadline_hours:g} h; {request.quantity - best_q} remain.", cache)
         if r:
             out.append(r)
     return out
 
 
-def gemma_remedies(client: GemmaClient, network, usable, dest_node, request, plans, anchors, nm) -> List[dict]:
+def gemma_remedies(client: GemmaClient, network, usable, dest_node, request, plans, anchors, nm,
+                   cache: Optional[dict] = None) -> List[dict]:
     """Gemma proposes business-sensible alternatives; each is accepted only if the planner proves it feasible."""
     facts = {
         "order": {"quantity": request.quantity, "deadline_hours": request.deadline_hours,
@@ -133,7 +144,7 @@ def gemma_remedies(client: GemmaClient, network, usable, dest_node, request, pla
         if not (0 < q <= request.quantity) or (q, round(h, 2)) in seen:
             continue
         r = verify_remedy(network, usable, dest_node, replace(request, quantity=q, deadline_hours=h), nm, "gemma",
-                          "split_or_adjust", why)
+                          "split_or_adjust", why, cache)
         if r:
             seen.add((q, r["deadline_hours"]))
             out.append(r)
@@ -180,10 +191,11 @@ def process_request(network: Network, warehouses: List[StorageNode], request: De
     remedies: List[dict] = []
     remedy_error: Optional[str] = None
     if not chosen and usable:
-        remedies = computed_remedies(network, usable, dest_node, request, plans, nm)
+        cache: dict = ctx._sssp  # shortest-path trees already computed for this request
+        remedies = computed_remedies(network, usable, dest_node, request, plans, nm, cache)
         if client is not None:
             try:
-                remedies += gemma_remedies(client, network, usable, dest_node, request, plans, remedies, nm)
+                remedies += gemma_remedies(client, network, usable, dest_node, request, plans, remedies, nm, cache)
             except Exception as exc:  # noqa: BLE001 - AI proposals are a bonus; computed options still stand
                 remedy_error = str(exc)
 

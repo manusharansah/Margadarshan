@@ -38,7 +38,7 @@ async def generate(action: str, request: Request):
         facts = json.loads(prompt.split("Facts: ", 1)[1].split("\nRespond", 1)[0])
         q, h = facts["order"]["quantity"], facts["order"]["deadline_hours"]
         return reply({"proposals": [
-            {"quantity": max(1, q // 3), "deadline_hours": max(h, 24), "rationale": "[test double] Ship a third now, the rest in a later run."},
+            {"quantity": max(1, min(q // 3, 1500)), "deadline_hours": max(h, 24), "rationale": "[test double] Ship part now, the rest in a later run."},
             {"quantity": q, "deadline_hours": 0.001, "rationale": "[test double] impossible - must be rejected by the planner."}]})
     if "No plan meets the deadline" in prompt:
         return reply({"chosen_index": None, "explanation": "[test double] Not deliverable as requested.", "risk_note": ""})

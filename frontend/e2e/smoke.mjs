@@ -37,7 +37,7 @@ await shot(page, "01-initial");
 
 // 2. Pick destination by searching a place name
 await page.getByLabel("Destination").fill("Dhul");
-await page.getByRole("button", { name: /Dhulikhel/ }).click();
+await page.getByRole("button", { name: /Dhulikhel/ }).first().click();
 await page
   .getByText(/27\.\d+, 85\.\d+/)
   .first()
@@ -74,7 +74,7 @@ await shot(page, "03-hazard");
 
 // 5a. Infeasible by deadline: honest reason + suggested deadline
 await page.locator('input[type="number"]').nth(1).fill("0.1");
-await page.locator('input[type="number"]').first().fill("400");
+await page.locator('input[type="number"]').first().fill("3000");
 await page.getByRole("button", { name: /Find Best Route/ }).click();
 await page.getByText("Cannot be fulfilled").waitFor({ timeout: 30000 });
 assert.match(await page.locator("aside").innerText(), /try a deadline of at least/);
@@ -90,7 +90,7 @@ await page.getByText("Cannot be fulfilled").waitFor({ timeout: 30000 });
 await page.getByRole("button", { name: "Clear destination" }).click();
 await page.getByText("Cannot be fulfilled").waitFor({ state: "hidden", timeout: 5000 });
 await page.locator(".leaflet-container").click({ position: { x: 600, y: 300 } });
-await page.getByText("Pinned location").waitFor();
+await page.getByText("Pinned location").first().waitFor();
 await page.locator('input[type="number"]').first().fill("300");
 await page.getByRole("button", { name: /Find Best Route/ }).click();
 await page
@@ -130,7 +130,14 @@ if (process.env.AI_E2E) {
   await page.getByText("Risk briefing").waitFor({ timeout: 30000 });
   await shot(page, "08-ai-risk-briefing");
   // Stock-limited order: planner-verified options, some proposed by the model
-  await page.locator('input[type="number"]').first().fill("4000");
+  const stock = (await (await page.request.get(BASE + "/api/warehouses")).json()).warehouses.reduce(
+    (t, w) => t + w.units_in_stock,
+    0,
+  );
+  await page
+    .locator('input[type="number"]')
+    .first()
+    .fill(String(Math.ceil(stock * 1.05)));
   await page.getByRole("button", { name: /Find Best Route/ }).click();
   await page.getByText("Options that would work").waitFor({ timeout: 30000 });
   const opts = await page.locator("[aria-label='Options that would work']").innerText();
@@ -152,7 +159,10 @@ if (process.env.AI_E2E) {
 // 6. Other pages
 await page.getByRole("link", { name: "Inventory" }).click();
 await page.getByRole("heading", { name: "Inventory" }).waitFor();
-await page.getByRole("cell", { name: /Sample Depot - Banepa/ }).waitFor();
+await page
+  .getByRole("cell", { name: /Banepa/ })
+  .first()
+  .waitFor();
 await page.getByRole("cell", { name: /Total/ }).waitFor();
 await shot(page, "05-inventory");
 await page.getByRole("link", { name: "Data", exact: true }).click();

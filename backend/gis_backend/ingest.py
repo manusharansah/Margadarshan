@@ -114,6 +114,15 @@ def build_network(overpass: dict, dem: Dem, incidents: Optional[IncidentIndex] =
                   bbox: Optional[Tuple[float, float, float, float]] = None,
                   max_piece_km: float = 0.5, progress: bool = False) -> dict:
     pieces, places = split_ways(overpass.get("elements", []), max_piece_km)
+    return build_network_from_pieces(pieces, places, dem, incidents, bbox, max_piece_km, progress,
+                                     roads_source="OpenStreetMap contributors (ODbL) via Overpass API")
+
+
+def build_network_from_pieces(pieces: List[Piece], places: List[dict], dem: Dem,
+                              incidents: Optional[IncidentIndex] = None,
+                              bbox: Optional[Tuple[float, float, float, float]] = None,
+                              max_piece_km: float = 0.5, progress: bool = False,
+                              roads_source: str = "") -> dict:
     edges: List[dict] = []
     for i, piece in enumerate(pieces):
         edge = build_edge(piece, dem, incidents)
@@ -141,7 +150,7 @@ def build_network(overpass: dict, dem: Dem, incidents: Optional[IncidentIndex] =
         "built_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "bbox_s_w_n_e": list(bbox) if bbox else None,
         "sources": {
-            "roads": "OpenStreetMap contributors (ODbL) via Overpass API",
+            "roads": roads_source,
             "elevation": "NASA SRTM 1 arc-second via AWS Open Data 'Terrain Tiles' (skadi)",
             "incidents": f"{len(incidents.points)} catalogued incidents" if incidents else "not supplied",
         },
@@ -168,6 +177,11 @@ def main(argv: Optional[List[str]] = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--bbox", nargs=4, type=float, metavar=("S", "W", "N", "E"),
                     default=[27.45, 85.25, 27.80, 85.80], help="study area (default: Kathmandu valley east -> Kavre)")
+    ap.add_argument("--source", choices=["overture", "overpass"], default="overture",
+                    help="road data source (default: Overture Maps on public S3; no API server needed)")
+    ap.add_argument("--all-road-classes", action="store_true",
+                    help="(overture) include residential lanes and tracks - much larger network")
+    ap.add_argument("--overture-release", help="(overture) release id; default: latest")
     ap.add_argument("--overpass-json", help="use a saved Overpass response instead of querying the API")
     ap.add_argument("--incidents", help="CSV of past landslide/flood incidents (latitude, longitude columns)")
     ap.add_argument("--out", default="data/network.json.gz")
@@ -175,14 +189,27 @@ def main(argv: Optional[List[str]] = None) -> None:
     ap.add_argument("--max-piece-km", type=float, default=0.5)
     args = ap.parse_args(argv)
 
-    if args.overpass_json:
-        overpass = json.loads(Path(args.overpass_json).read_text())
-    else:
-        print("Querying Overpass API ...", flush=True)
-        overpass = fetch_overpass(tuple(args.bbox))  # type: ignore[arg-type]
     incidents = IncidentIndex.from_csv(args.incidents) if args.incidents else None
-    artifact = build_network(overpass, Dem(args.dem_dir), incidents, tuple(args.bbox),  # type: ignore[arg-type]
-                             args.max_piece_km, progress=True)
+    bbox = tuple(args.bbox)
+    if args.source == "overture" and not args.overpass_json:
+        from .overture import ALL_DRIVABLE_CLASSES, TRUCK_CLASSES, load_overture
+
+        pieces, places, release = load_overture(
+            bbox, Path(args.dem_dir).parent, ALL_DRIVABLE_CLASSES if args.all_road_classes else TRUCK_CLASSES,
+            args.overture_release)  # type: ignore[arg-type]
+        print(f"{len(pieces)} road pieces; sampling elevation ...", flush=True)
+        artifact = build_network_from_pieces(
+            pieces, places, Dem(args.dem_dir), incidents, bbox, args.max_piece_km, progress=True,  # type: ignore[arg-type]
+            roads_source=f"Overture Maps Foundation transportation theme, release {release} "
+                         "(open data, largely OpenStreetMap-derived; ODbL)")
+    else:
+        if args.overpass_json:
+            overpass = json.loads(Path(args.overpass_json).read_text())
+        else:
+            print("Querying Overpass API ...", flush=True)
+            overpass = fetch_overpass(bbox)  # type: ignore[arg-type]
+        artifact = build_network(overpass, Dem(args.dem_dir), incidents, bbox,  # type: ignore[arg-type]
+                                 args.max_piece_km, progress=True)
     save(artifact, Path(args.out))
     print(json.dumps(artifact["meta"], indent=2))
 

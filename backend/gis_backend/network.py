@@ -103,9 +103,18 @@ class Network:
     def bbox(self) -> Tuple[float, float, float, float]:
         return float(self._lat.min()), float(self._lng.min()), float(self._lat.max()), float(self._lng.max())
 
+    KIND_RANK = {"city": 0, "municipality": 0, "town": 1, "county": 2, "village": 3, "hamlet": 4}
+
     def search_places(self, q: str, limit: int = 8) -> List[dict]:
+        """Case-insensitive substring match on the English or local name; towns rank above neighbourhoods."""
         q = q.strip().lower()
         if not q:
             return []
-        scored = [(0 if p["name"].lower().startswith(q) else 1, p) for p in self.places if q in p["name"].lower()]
-        return [p for _, p in sorted(scored, key=lambda t: (t[0], t[1]["name"]))[:limit]]
+
+        def score(p: dict):
+            names = [p["name"].lower(), (p.get("name_local") or "").lower()]
+            starts = any(n.startswith(q) for n in names)
+            return (0 if starts else 1, self.KIND_RANK.get(p.get("kind", ""), 5), len(p["name"]), p["name"])
+
+        hits = [p for p in self.places if q in p["name"].lower() or q in (p.get("name_local") or "").lower()]
+        return sorted(hits, key=score)[:limit]

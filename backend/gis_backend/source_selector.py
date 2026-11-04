@@ -24,14 +24,25 @@ from .routing import best_route, held_karp_tsp, path_geometry, path_hotspots, pa
 MAX_MULTI_CANDIDATES = 8   # nearest warehouses considered for combinations
 MAX_MULTI_SOURCES = 4
 MAX_PICKUP_STOPS = 4
+MAX_TRIPS = 10             # one vehicle repeating more trips than this is not a realistic plan
+MAX_MULTISTOP_HOMES = 3    # candidate base depots (nearest to the destination that have a vehicle)
 
 
 class PlanContext:
     def __init__(self, G: nx.Graph, warehouses: Dict[str, StorageNode], dest_node: int,
-                 request: DeliveryRequest, loading_hours: float = 0.0, k: int = 3):
+                 request: DeliveryRequest, loading_hours: float = 0.0, k: int = 3,
+                 sssp_cache: Optional[dict] = None):
         self.G, self.W, self.dest = G, warehouses, dest_node
         self.req, self.loading, self.k = request, loading_hours, k
         self._routes: Dict[str, Optional[dict]] = {}
+        # Single-source shortest-path trees, shared across plan attempts for the same graph (the weights
+        # do not depend on the request), which makes repeated trips and remedy searches cheap.
+        self._sssp: dict = sssp_cache if sssp_cache is not None else {}
+
+    def sssp(self, node: int):
+        if node not in self._sssp:
+            self._sssp[node] = nx.single_source_dijkstra(self.G, node, weight="weight")
+        return self._sssp[node]
 
     def route(self, wid: str) -> Optional[dict]:
         if wid not in self._routes:
@@ -105,9 +116,12 @@ def multistop_plan(ctx: PlanContext, home: str) -> Optional[CandidatePlan]:
     """One vehicle based at ``home`` collects from several warehouses, repeating trips as needed."""
     G, req = ctx.G, ctx.req
     cap = ctx.W[home].vehicle_capacity
+    if -(-req.quantity // cap) > MAX_TRIPS:
+        return None
     home_node = ctx.W[home].road_node
     pool = {w: s.units_in_stock for w, s in ctx.W.items() if s.road_node is not None}
-    dist_home = nx.single_source_dijkstra_path_length(G, home_node, weight="weight")
+    dist_home = ctx.sssp(home_node)[0]
+    dest_paths = ctx.sssp(ctx.dest)[1]       # symmetric weights: reverse a path from the destination
     remaining, legs, total_time, prev_end = req.quantity, [], 0.0, None
 
     while remaining > 0:
@@ -123,18 +137,18 @@ def multistop_plan(ctx: PlanContext, home: str) -> Optional[CandidatePlan]:
             covered += take
         if covered < target:
             return None
-        tsp = held_karp_tsp(G, home_node, [ctx.W[w].road_node for w, _ in picked])
-        final = best_route(G, tsp["visit_order"][-1], ctx.dest, ctx.k, None) if tsp else None
-        if not tsp or not final:
+        tsp = held_karp_tsp(G, home_node, [ctx.W[w].road_node for w, _ in picked], sssp=ctx.sssp)
+        if not tsp or tsp["visit_order"][-1] not in dest_paths:
             return None
-        path = tsp["path"] + final["path"][1:]
+        path = tsp["path"] + dest_paths[tsp["visit_order"][-1]][::-1][1:]
         m = path_metrics(G, path)
         trip_time = m["time_hours"] + ctx.loading * len(picked)
         fuel, cost = m["fuel_litres"], m["edge_cost"]
         if prev_end is not None:  # return from the previous delivery before starting this trip
-            back = best_route(G, prev_end, home_node, 1)
+            back = ctx.sssp(home_node)[1].get(prev_end)
             if back:
-                trip_time, fuel, cost = trip_time + back["time_hours"], fuel + back["fuel_litres"], cost + back["edge_cost"]
+                bm = path_metrics(G, back[::-1])
+                trip_time, fuel, cost = trip_time + bm["time_hours"], fuel + bm["fuel_litres"], cost + bm["edge_cost"]
         order = [next(w for w, _ in picked if ctx.W[w].road_node == n) for n in tsp["visit_order"][1:]]
         legs.append(RouteLeg(
             source="+".join(order), path=path, time_hours=trip_time, edge_cost=cost, units_carried=covered,
@@ -154,6 +168,8 @@ def multistop_plan(ctx: PlanContext, home: str) -> Optional[CandidatePlan]:
 
 
 def generate_plans(ctx: PlanContext) -> List[CandidatePlan]:
+    if sum(w.units_in_stock for w in ctx.W.values() if w.road_node is not None) < ctx.req.quantity:
+        return []  # not enough stock anywhere in the network: no plan can exist, skip all routing
     plans = single_source_plans(ctx)
     if any(p.meets_deadline for p in plans):
         return plans
@@ -161,7 +177,9 @@ def generate_plans(ctx: PlanContext) -> List[CandidatePlan]:
     plans += multi
     if any(p.meets_deadline for p in multi):
         return plans
-    homes = [w for w, s in ctx.W.items() if s.road_node is not None and s.vehicles_available > 0]
+    dest_dist = ctx.sssp(ctx.dest)[0]
+    homes = sorted((w for w, s in ctx.W.items() if s.road_node in dest_dist and s.vehicles_available > 0),
+                   key=lambda w: dest_dist[ctx.W[w].road_node])[:MAX_MULTISTOP_HOMES]
     stops = [p for p in (multistop_plan(ctx, h) for h in homes) if p]
     if stops:
         plans.append(min(stops, key=lambda p: p.total_time_hours))
