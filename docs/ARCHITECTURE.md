@@ -1,65 +1,69 @@
 # Architecture
 
 ```
- Browser ──► Frontend (TanStack Start, Node)         /api/* allow-list gateway
-                │   GET /meta /network /places /warehouses   POST /optimize-route
-                ▼
-            FastAPI ── Network (graph + snapping) ◄── network.json.gz  (built offline from OSM + SRTM)
-                │  ├── WeatherService ◄── Open-Meteo   (cached 30 min; failure = reported, never invented)
-                │  ├── Planner (Yen, Held-Karp)        (pure code)
-                │  ├── WarehouseStore ◄── SQLite | PostgreSQL (operator-maintained inventory)
-                │  └── Reasoner ◄── Gemma (optional)   (selects among feasible plans, explains)
+Browser -> Frontend (TanStack Start, Node) -> /api gateway with an allow-list
+                                                |
+                                                v
+          FastAPI -- Network (graph and snapping) <-- network.json.gz, built offline
+             |-- WeatherService  <-- Open-Meteo, cached for 30 minutes
+             |-- Planner         (Yen, Held-Karp; plain code)
+             |-- WarehouseStore  <-- SQLite or PostgreSQL, maintained by the operator
+             `-- Gemma client    <-- Google AI Studio, optional unless MARGA_REQUIRE_GEMMA is set
 ```
 
 ## Two phases
 
-**Offline ingestion** (`python -m gis_backend.ingest`, minutes, run when the map changes)
-OSM ways → drop non-drivable → split at junctions → cut into ≤ 0.5 km pieces (virtual nodes inside long straight
-segments) → sample SRTM every ~30 m → smoothed ascent/descent, mean & max grade, hillslope angle → terrain hazard →
-optional incident proximity → keep the largest connected component → `network.json.gz` with a provenance block.
+Offline ingestion runs `python -m gis_backend.ingest` once per map update. It loads road segments, splits them at
+junctions, cuts them into pieces of 0.5 km or less, samples elevation every 30 m, derives grade and terrain hazard, keeps
+the largest connected component, and writes `network.json.gz` with a metadata block listing every source.
 
-**Online serving** (milliseconds)
-Load artifact → NetworkX graph → apply rainfall to edge weights → per request: snap, plan, filter, rank, explain.
+Online serving loads that file, builds a NetworkX graph, applies current rainfall to the edge weights, and answers
+each request by snapping, planning, filtering, ranking and explaining.
 
-## Cost model (`edge_weight.py`)
+## Cost model
+
+All constants sit at the top of `edge_weight.py` with their reasoning.
 
 ```
-weight = length × (1 + surface_penalty + 0.005 × mean_grade%) + hazard × length × 1.5
-hazard = blend(terrain, incidents) × (1 + 1.5 × rain_index)        capped at 1
-time   = length / max(5, maxspeed × surface_factor × grade_factor)
-fuel   = length × 0.30 L/km × surface_factor + climb_energy / (0.30 × 36 MJ/L)      direction-aware
+weight = length * (1 + surface_penalty + 0.005 * mean_grade_percent) + hazard * length * 1.5
+hazard = blend(terrain, incidents) * (1 + 1.5 * rain_index), capped at 1
+time   = length / max(5, max_speed * surface_factor * grade_factor)
+fuel   = length * 0.30 L/km * surface_factor + climb_energy / (0.30 * 36 MJ per litre)
 ```
-All constants sit at the top of the module with their rationale.
 
-## Planner (`source_selector.py`)
+Fuel depends on direction, because climbing costs more than descending.
+
+## Planner
 
 | Tier | Plan | Arrival time |
 |---|---|---|
-| 1 | One warehouse, ⌈Q/capacity⌉ vehicles in parallel | its route time |
-| 2 | 2–4 warehouses (8 nearest candidates), parallel | slowest leg |
-| 3 | One vehicle, Held-Karp pickup order, repeated trips with return legs | sum of trips |
+| 1 | One warehouse, enough vehicles in parallel | Its route time |
+| 2 | Two to four warehouses from the eight nearest, in parallel | The slowest leg |
+| 3 | One vehicle collecting from several warehouses, in the best order, over up to 10 trips | Sum of the trips |
 
-`best_route` returns the cheapest path meeting the deadline, else the fastest path (true best case for the
-"infeasible" message). It is lazy: Yen's K-shortest is run only when the cheapest path misses the deadline *and* a faster
-path exists — equivalent results, ~100× faster (see STAR.md).
+`best_route` returns the cheapest path that meets the deadline, or the fastest path when none does, so the "cannot be
+delivered" message can state the true best case. It runs Yen's algorithm only when the cheapest path is too slow and a
+faster path exists. Shortest-path trees are cached per request, so repeated trips and remedy searches reuse them.
+Three guards keep impossible orders fast: the planner returns at once when total stock is below the order, tier 3
+rejects plans needing more than 10 trips, and tier 3 starts from only the three nearest depots with a vehicle.
 
-## Honesty guarantees
+## Where Gemma contributes
 
-* Numbers in a response are sums over road data. Gemma never produces or alters them.
-* Gemma only sees plans that already meet the deadline, as figures (no geometry), and its chosen index is validated.
-* Any failure to reach Gemma/Open-Meteo is surfaced in the response (`gemma_error`, `weather.error`).
-* The UI labels fixture data, rule-based vs Gemma explanations, and missing rainfall.
-* The public gateway forwards only 5 read endpoints and the optimiser; inventory writes need `X-API-Key` and are
-  unreachable from the website.
-
-## Where the AI contributes (and where it may not)
-
-| Feature | What Gemma does | What code does (authoritative) |
+| Feature | What Gemma does | What code does |
 |---|---|---|
-| Order intake `POST /parse-order` | extracts destination text, quantity, deadline *as written* | all date arithmetic (Nepal time), range checks, place lookup; form is pre-filled, never auto-run |
-| Plan choice + explanation | picks one index among deadline-feasible plans; writes 2–4 sentences | feasibility, ranking policy, index validation, fallback if invalid |
-| Risk briefing | summarises the named riskiest stretches | computes the stretches (hazard, grade, rain) from the road graph |
-| Remedies when infeasible | proposes alternative (quantity, deadline) pairs with a rationale | **re-runs the planner on every proposal**; unproven ones are dropped; computed options always shown |
+| Order intake, `POST /parse-order` | Extracts the destination text, quantity and deadline as written | Computes deadline hours from the current Nepal time, checks ranges, looks up the place. The form is pre-filled and the dealer confirms. |
+| Plan choice and explanation | Picks one index among deadline-feasible plans and writes 2 to 4 sentences | Decides feasibility, ranks plans, validates the index, and falls back to rule-based text if the output is invalid |
+| Risk briefing | Summarises the named riskiest stretches | Finds those stretches from the road graph with their hazard, grade and rain figures |
+| Options when infeasible | Proposes alternative quantity and deadline pairs with a reason | Re-runs the planner on each proposal and drops any it cannot prove feasible. It always adds its own options too. |
 
-Guardrails are unit-tested with a stub model (`tests/test_ai_features.py`). `scripts/fake_gemma_server.py` is a labelled
-test double for end-to-end runs without a key — it checks wiring, not language quality.
+Tests in `tests/test_ai_features.py` cover these checks with a stub model. `scripts/fake_gemma_server.py` is a labelled
+stand-in that speaks Gemma's wire format, so the real HTTP client and the UI run end to end without a key. It tests
+wiring only and says nothing about the real model's wording.
+
+## Safety properties
+
+* Every number in a response is a sum over road data. Gemma never produces or changes one.
+* Gemma sees only plans that already meet the deadline, as figures without geometry, and its chosen index is validated.
+* A failure to reach Gemma or Open-Meteo appears in the response as `gemma_error` or `weather.error`.
+* The interface labels fixture data, rule-based text and missing rainfall.
+* The public gateway forwards six endpoints. Inventory writes need `X-API-Key` and the website cannot reach them.

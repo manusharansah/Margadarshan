@@ -1,100 +1,110 @@
 # MargaAI Nepal
 
-**मार्ग (marga) — "route".** A decision-support system that tells a dealer, for a given destination, quantity and
-deadline, *which warehouse(s) should ship, by which road, and whether it can arrive in time* — on Nepal's hilly,
-landslide-prone road network, using real road, elevation and rainfall data.
+MargaAI (मार्ग, "route") helps a dealer in Nepal's hills answer one question: for this destination, quantity and
+deadline, which warehouses should ship, along which roads, and will it arrive in time? It routes over real road,
+elevation and rainfall data and explains each recommendation in plain language.
 
-| | |
+| Part | Technology |
 |---|---|
-| **Backend** | Python 3.13 · FastAPI · NetworkX (Yen's K-shortest paths, Held-Karp TSP) · SQLAlchemy |
-| **Frontend** | React 19 · TanStack Start · Tailwind v4 · Leaflet |
-| **Real data** | OpenStreetMap roads · NASA SRTM elevation · Open-Meteo rainfall · optional landslide-incident CSV |
-| **Reasoning** | Gemma (Google AI Studio) selects among already-feasible plans and explains; all arithmetic is plain code |
-| **Deploy** | Docker · GitHub Actions · AWS ECS Fargate + RDS + S3 (CloudFormation) |
+| Backend | Python 3.13, FastAPI, NetworkX (Yen's K-shortest paths, Held-Karp TSP), SQLAlchemy |
+| Frontend | React 19, TanStack Start, Tailwind v4, Leaflet |
+| Real data | Overture Maps roads (or OpenStreetMap via Overpass), NASA SRTM elevation, Open-Meteo rainfall |
+| AI | Gemma through Google AI Studio |
+| Deployment | Docker, GitHub Actions, AWS ECS Fargate with RDS and S3, described in CloudFormation |
 
-> **Status, stated plainly.** The platform is complete and tested end to end. Two inputs are *yours* and are not
-> bundled: (1) the **road network artifact**, built from OpenStreetMap by one command
-> ([docs/DATA_SOURCES.md](docs/DATA_SOURCES.md)), and (2) **warehouse inventory** (no public source exists). Until the
-> real artifact is built the UI shows a "development fixture" banner. Gemma has **not** yet been exercised against the live
-> API (needs your key). See [Verification status](#verification-status).
+## Current status
 
-## How it works
+The software is finished and tested. It runs on a real road network of the Kathmandu valley and Kavre district
+(27,018 junctions, 28,549 road pieces, 4,806 km) with live rainfall. Three things are still open:
 
-1. The dealer enters **destination**, **quantity** and **deadline** — nothing else.
-2. Destination and warehouses are snapped to the nearest mapped road.
-3. Every road piece (≤ 0.5 km) gets a cost from its real length, surface, DEM-derived grade and a hazard score that is
-   amplified by recent + forecast rainfall.
-4. Candidate plans are generated in priority order — one warehouse → several warehouses in parallel → one vehicle visiting
-   several (exact TSP) — using shortest-path search. A later tier is explored only if no earlier tier meets the deadline.
-5. **Code** discards plans that miss the deadline and ranks the rest (fewest warehouses → fewest vehicles → lowest cost).
-6. **Gemma** does the language work, never the arithmetic:
-   * **Order intake** — type *"500 units to Dhulikhel by tomorrow 5 pm"*; Gemma extracts the fields, **code** computes the
-     deadline hours and resolves the place, the dealer confirms.
-   * **Selection + explanation + risk briefing** — chooses among already-feasible plans and writes a briefing grounded in
-     the named riskiest road stretches (hazard, grade, rain figures).
-   * **Options when it can't be delivered** — Gemma proposes partial shipments / adjusted deadlines; **each proposal is
-     re-run through the real planner and shown only if proven feasible**. Code-derived options are always included.
+1. Gemma has never been called live. Tests use a stub, and the browser test uses a labelled stand-in server. Add
+   `GEMMA_API_KEY` and run the first live call.
+2. Warehouse stock and fleet are demo data. Only you have the real figures. See [docs/INVENTORY_FORMAT.md](docs/INVENTORY_FORMAT.md).
+3. Nothing is deployed to AWS yet, and the Docker images have only been built by CI definitions, not run here.
 
-   Set `MARGA_REQUIRE_GEMMA=true` (the AWS stack does this when a key is given) and the service refuses to start without
-   the AI layer. For local development it degrades to labelled rule-based text (`explanation_source: "deterministic"`).
+## How a recommendation is made
 
-Full design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+1. The dealer enters a destination, a quantity and a deadline. Typing the order in plain language also works.
+2. The destination and each warehouse snap to the nearest mapped road.
+3. Each road piece (0.5 km or less) gets a cost from its length, surface, grade from elevation data, and a hazard
+   score that rises with recent and forecast rain.
+4. The planner builds candidate plans in priority order: one warehouse, then several warehouses in parallel, then one
+   vehicle visiting several warehouses in the best order. It tries a later option only when an earlier one misses the
+   deadline.
+5. Code discards plans that miss the deadline and ranks the rest by fewest warehouses, then fewest vehicles, then lowest cost.
+6. Gemma does the language work and never the arithmetic. It reads typed orders, picks among plans that already
+   meet the deadline, writes a risk briefing about the named riskiest road stretches, and proposes alternatives when
+   delivery is impossible. The planner re-checks every proposal and the page shows only the feasible ones.
 
-## Quick start (local)
+With `MARGA_REQUIRE_GEMMA=true` the service refuses to start without a Gemma key. Without that setting, a missing
+key degrades to rule-based text that the response labels `explanation_source: "deterministic"`.
+
+More detail: [architecture](docs/ARCHITECTURE.md), [data sources](docs/DATA_SOURCES.md), [deployment](docs/DEPLOYMENT.md),
+[engineering case study](docs/STAR.md).
+
+## Run it locally
 
 ```bash
-# Backend
-cd backend && python -m venv .venv && . .venv/bin/activate && pip install -r requirements-dev.txt
-python -m gis_backend.ingest --bbox 27.45 85.25 27.80 85.80 --out data/network.json.gz   # needs overpass-api.de
-python -m gis_backend.seed_warehouses examples/warehouses.sample.csv              # replace with YOUR inventory (format: docs/INVENTORY_FORMAT.md)
-export MARGA_ADMIN_API_KEY=change-me GEMMA_API_KEY=...   # GEMMA_API_KEY optional
+cd backend
+python -m venv .venv && . .venv/bin/activate
+pip install -r requirements-dev.txt -r requirements-ingest.txt
+python -m gis_backend.ingest --bbox 27.45 85.25 27.80 85.80 --out data/network.json.gz
+python -m gis_backend.seed_warehouses examples/warehouses.demo.csv
+export MARGA_ADMIN_API_KEY=change-me
+export GEMMA_API_KEY=your-key          # optional for development
 uvicorn gis_backend.api:app --port 8000
-
-# Frontend (second terminal)
-cd frontend && cp .env.example .env && npm ci && npm run dev
 ```
 
-No internet access to OpenStreetMap yet? `python scripts/make_dev_fixture.py data/dev/network.json.gz` builds a clearly
-labelled **fixture** (real elevations, synthetic roads) so the whole stack can be exercised. Never deploy it.
+In a second terminal:
 
-Or everything in containers: `docker compose up --build`.
-
-## Repository map
-
-```
-backend/gis_backend/   dem.py osm.py hazard.py ingest.py   real-data pipeline (offline, run once)
-                       network.py weather.py                runtime graph, snapping, live rainfall
-                       edge_weight.py routing.py            cost model; Yen + Held-Karp
-                       source_selector.py service.py        plan generation, ranking, orchestration
-                       gemma_reasoner.py store.py api.py    reasoning layer, inventory DB, HTTP API
-backend/tests/         108 tests (brute-force oracles, real SRTM, API, Gemma/weather with stubbed HTTP)
-frontend/src/          routes/ (Plan, Inventory, Data) · components/ · lib/api.ts · routes/api/$.ts (gateway)
-frontend/e2e/smoke.mjs full-site browser smoke test
-infra/marga.cfn.yml    AWS stack · .github/workflows  CI + deploy
-docs/                  ARCHITECTURE · DATA_SOURCES · DEPLOYMENT · STAR (case study) · API
+```bash
+cd frontend
+cp .env.example .env
+npm ci
+npm run dev
 ```
 
-## Verification status
+The ingestion step downloads roughly 50 MB of road data and elevation tiles and takes two to three minutes. The
+first run needs outbound HTTPS to `overturemaps-us-west-2.s3.amazonaws.com` and `elevation-tiles-prod.s3.amazonaws.com`.
+To run everything in containers, use `docker compose up --build`.
 
-| Claim | Evidence | State |
-|---|---|---|
-| Routing is optimal | Yen's vs brute-force path enumeration; Held-Karp vs all permutations | ✅ tested |
-| Elevation/grade are real | Sampled SRTM vs published town altitudes (±100 m), ridge/valley ordering | ✅ tested against real tiles |
-| Planner arithmetic | Units sum to Q, vehicles = ⌈units/capacity⌉, time = slowest leg, tier priority | ✅ tested |
-| API contract & security | Admin key on writes, validation, 422 outside network, public gateway blocks writes | ✅ tested |
-| Whole website works | Full-site Playwright smoke test (all pages, both infeasible paths, gateway blocking, mobile), 0 browser errors | ✅ passing (on fixture data) |
-| Scale | 14,400 nodes / 28,560 edges: 0.06–0.47 s per request | ✅ measured |
-| **Real OSM network built** | Needs outbound access to `overpass-api.de` | ⏳ blocked in the build sandbox |
-| **Live rainfall** | Needs `api.open-meteo.com`; parsing tested with stubbed HTTP | ⏳ not run live |
-| AI guardrails | Stub-model tests: date maths in code, bad outputs rejected, proposals verified by planner; full UI flow vs a labelled test double | ✅ tested |
-| **Gemma live** | Needs `GEMMA_API_KEY` (prompt quality / model id never exercised against the real API) | ⏳ not run live |
-| **Docker images / AWS stack** | Template passes `cfn-lint`; Dockerfiles built by CI (no Docker daemon in sandbox) | ⏳ not deployed |
+## Repository layout
 
-## Limits you should know
+```
+backend/gis_backend/   overture.py osm.py dem.py hazard.py ingest.py   data pipeline, run once per map update
+                       network.py weather.py                           graph, snapping, live rainfall
+                       edge_weight.py routing.py                       cost model, Yen, Held-Karp
+                       source_selector.py service.py                   plan generation, ranking, remedies
+                       gemma_reasoner.py intake.py store.py api.py     AI layer, order intake, inventory, HTTP API
+backend/tests/         114 tests
+backend/examples/      sample and demo warehouse CSVs
+frontend/src/          pages, components, and the /api gateway
+frontend/e2e/          browser smoke test
+infra/                 CloudFormation stack
+docs/                  architecture, data, deployment, inventory format, case study
+```
 
-Hazard is a screening index (terrain, optional incidents, rainfall), not a calibrated probability. Grades come from
-30 m SRTM. Speeds are planning defaults by road class; one-way roads, live traffic and closures are not modelled.
-Fuel is an engineering estimate to be calibrated against fleet logs. A single order uses at most one trip per
-vehicle outside the multi-stop tier. Details: [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md).
+## What was verified
 
-Original workflow specification: [GIS_Route_Optimization_Workflow.docx](GIS_Route_Optimization_Workflow.docx).
+| Claim | Evidence |
+|---|---|
+| Routing is optimal | Yen's paths match brute-force enumeration. Held-Karp matches every permutation. |
+| Road distances are right | Kathmandu to Banepa routes at 26.4 km, to Dhulikhel at 29.3 km, to Bhaktapur at 15.1 km, which match the known road distances. |
+| Elevation is real | SRTM samples for Kathmandu, Dhulikhel and Banepa land within 100 m of published altitudes. |
+| Planner arithmetic | Tests check that units sum to the order, vehicles equal the rounded-up units per capacity, and arrival equals the slowest leg. |
+| Speed on the real network | Ordinary requests take 0.05 to 0.35 s. Impossible orders take 1.3 to 1.8 s. |
+| Rainfall is live | Open-Meteo returned 24 grid points for the study area. |
+| Whole site works | The Playwright smoke test passes on the real network, including the AI flows against the stand-in, with no browser errors. |
+| AI safety checks | Stub-model tests show that bad dates, malformed output and infeasible proposals are rejected. |
+| Gemma live | Not tested. Needs a key. |
+| AWS deployment | Not done. The template passes `cfn-lint`. |
+
+## Limits
+
+The hazard score is a screening index built from terrain steepness, optional incident history and rainfall. It is not a
+calibrated landslide probability. Grades come from 30 m SRTM data. About 76% of road pieces have no surface tag in the
+source data, so their surface comes from the road class. Speeds are planning defaults by road class. One-way roads,
+live traffic and closures are not modelled. Fuel is an engineering estimate that needs calibrating against your fleet logs.
+The default network leaves out residential lanes and tracks to keep it fast.
+
+The original workflow specification is in [GIS_Route_Optimization_Workflow.docx](GIS_Route_Optimization_Workflow.docx).
