@@ -81,6 +81,7 @@ class RouteLeg:
     descent_m: float = 0.0
     geometry: List[LatLngElev] = field(default_factory=list)
     pickups: List[str] = field(default_factory=list)  # warehouse ids visited, in order
+    hotspots: List[dict] = field(default_factory=list)  # riskiest road stretches on this leg
 
 
 @dataclass

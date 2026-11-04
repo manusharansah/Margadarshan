@@ -19,7 +19,7 @@ import networkx as nx
 
 from .feasibility import can_fulfill_alone, vehicles_needed
 from .models import CandidatePlan, DeliveryRequest, RouteLeg, StorageNode
-from .routing import best_route, held_karp_tsp, path_geometry, path_metrics
+from .routing import best_route, held_karp_tsp, path_geometry, path_hotspots, path_metrics
 
 MAX_MULTI_CANDIDATES = 8   # nearest warehouses considered for combinations
 MAX_MULTI_SOURCES = 4
@@ -49,7 +49,7 @@ class PlanContext:
             units_carried=units, vehicles_used=vehicles_needed(units, wh.vehicle_capacity),
             fuel_litres=r["fuel_litres"], distance_km=r["distance_km"], max_hazard=r["max_hazard"],
             ascent_m=r["ascent_m"], descent_m=r["descent_m"], geometry=path_geometry(self.G, r["path"]),
-            pickups=[wid],
+            pickups=[wid], hotspots=path_hotspots(self.G, r["path"]),
         )
 
 
@@ -140,6 +140,7 @@ def multistop_plan(ctx: PlanContext, home: str) -> Optional[CandidatePlan]:
             source="+".join(order), path=path, time_hours=trip_time, edge_cost=cost, units_carried=covered,
             vehicles_used=1, fuel_litres=fuel, distance_km=m["distance_km"], max_hazard=m["max_hazard"],
             ascent_m=m["ascent_m"], descent_m=m["descent_m"], geometry=path_geometry(G, path), pickups=order,
+            hotspots=path_hotspots(G, path),
         ))
         total_time += trip_time
         for w, take in picked:

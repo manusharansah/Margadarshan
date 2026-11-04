@@ -10,7 +10,7 @@ import { createFileRoute } from "@tanstack/react-router";
  */
 const ALLOWED: Record<string, string[]> = {
   GET: ["/health", "/meta", "/network", "/places", "/warehouses"],
-  POST: ["/optimize-route"],
+  POST: ["/optimize-route", "/parse-order"],
 };
 
 function backendBase(): string {

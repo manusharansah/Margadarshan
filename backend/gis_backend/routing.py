@@ -149,3 +149,19 @@ def held_karp_tsp(G: nx.Graph, start: int, stops: List[int]) -> Optional[dict]:
     for a, b in zip(visit, visit[1:]):
         path.extend(pair_path[(a, b)][1:])
     return {"visit_order": [pts[i] for i in visit], "path": path, "edge_cost": cost}
+
+
+def path_hotspots(G: nx.Graph, path: List[int], k: int = 3) -> List[dict]:
+    """The k riskiest distinct road stretches on a path (grounding for the risk briefing)."""
+    best: Dict[str, dict] = {}
+    for u, v in zip(path, path[1:]):
+        d = G[u][v]
+        e = d["edge"]
+        label = e.name or f"unnamed {e.highway} road"
+        mid = e.geometry[len(e.geometry) // 2]
+        cur = best.get(label)
+        if cur is None or d["hazard"] > cur["hazard"]:
+            best[label] = {"road": label, "hazard": round(d["hazard"], 2), "rain_index": round(d["rain_index"], 2),
+                           "grade_pct": round(e.slope_pct, 1), "surface": e.road_type,
+                           "lat": round(mid[0], 5), "lng": round(mid[1], 5)}
+    return sorted(best.values(), key=lambda h: -h["hazard"])[:k]

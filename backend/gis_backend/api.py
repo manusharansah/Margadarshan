@@ -27,6 +27,8 @@ from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 
 from .config import Settings, get_settings
+from .gemma_reasoner import GemmaClient, get_client
+from .intake import MAX_TEXT, parse_order
 from .models import DeliveryRequest, StorageNode
 from .network import Network, NetworkUnavailable
 from .service import process_request
@@ -44,6 +46,10 @@ class RouteRequestIn(BaseModel):
     deadline_hours: float = Field(gt=0, le=720, description="Hours until delivery is due")
 
 
+class ParseOrderIn(BaseModel):
+    text: str = Field(min_length=1, max_length=MAX_TEXT)
+
+
 class WarehouseIn(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     lat: float = Field(ge=-90, le=90)
@@ -54,11 +60,16 @@ class WarehouseIn(BaseModel):
 
 
 def create_app(settings: Optional[Settings] = None, network: Optional[Network] = None,
-               store: Optional[WarehouseStore] = None, weather: Optional[WeatherService] = None) -> FastAPI:
+               store: Optional[WarehouseStore] = None, weather: Optional[WeatherService] = None,
+               client: Optional[GemmaClient] = None) -> FastAPI:
     cfg = settings or get_settings()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        app.state.client = client if client is not None else get_client()
+        if cfg.require_gemma and app.state.client is None:
+            raise RuntimeError("MARGA_REQUIRE_GEMMA is set but GEMMA_API_KEY is missing - refusing to start "
+                               "without the AI layer.")
         app.state.network, app.state.network_error = network, None
         if app.state.network is None:
             try:
@@ -114,7 +125,9 @@ def create_app(settings: Optional[Settings] = None, network: Optional[Network] =
         w = request.app.state.weather
         return {"network": n.meta, "weather": w.status() if w else {"available": False, "error": "disabled"},
                 "warehouses": len(request.app.state.store.list()),
-                "reasoner": "gemma" if _gemma_configured() else "deterministic"}
+                "reasoner": "gemma" if request.app.state.client else "deterministic",
+                "ai_features": {"explanations": bool(request.app.state.client), "order_intake": bool(request.app.state.client),
+                                "remedies": bool(request.app.state.client), "required": cfg.require_gemma}}
 
     @app.get("/network")
     def network_geojson(request: Request):
@@ -168,16 +181,26 @@ def create_app(settings: Optional[Settings] = None, network: Optional[Network] =
                                quantity=req.quantity, deadline_hours=req.deadline_hours,
                                destination_name=req.destination_name)
         try:
-            return process_request(n, request.app.state.store.list(), dreq, weather=weather_status)
+            return process_request(n, request.app.state.store.list(), dreq, weather=weather_status,
+                                   reasoner=request.app.state.client,
+                                   client=request.app.state.client)
         except ValueError as exc:  # destination outside the loaded network
             raise HTTPException(422, str(exc)) from exc
 
+    @app.post("/parse-order")
+    def parse_order_endpoint(body: ParseOrderIn, request: Request):
+        n = net_of(request)
+        c: Optional[GemmaClient] = request.app.state.client
+        if c is None:
+            raise HTTPException(503, "AI order intake is not configured (GEMMA_API_KEY missing).")
+        try:
+            return parse_order(body.text, c, n.search_places)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except RuntimeError as exc:  # Gemma unreachable / malformed output
+            raise HTTPException(502, f"The AI service couldn't read that order: {exc}") from exc
+
     return app
-
-
-def _gemma_configured() -> bool:
-    import os
-    return bool(os.environ.get("GEMMA_API_KEY"))
 
 
 app = create_app()

@@ -58,3 +58,14 @@ from the site. Typed client. If Gemma is absent/fails the recommendation (alread
 CloudFormation stack (Fargate, RDS, S3, ALB, Secrets Manager), cleanup.
 **R** Template passes `cfn-lint`; CI definition parses. *Not yet verified:* Docker image builds (no daemon in sandbox → CI
 runs them) and the actual AWS deployment (needs your credentials).
+
+## 7. Make the AI contribute, safely
+**S** Gemma was optional decoration: it only re-worded a result the code had already fixed, and the product behaved the same without it.
+**T** Give the language model work only a language model can do, without letting it touch numbers.
+**A** Three features behind strict guardrails — plain-language order intake (code computes the deadline and resolves the
+place; dealer confirms), verified remedies when delivery is impossible (every model proposal is re-run through the real
+planner), and a risk briefing grounded in the named riskiest road stretches. Added `MARGA_REQUIRE_GEMMA` so production can
+refuse to start without it. Wrote a labelled test double of the Gemma wire format to test the real HTTP client and UI.
+**R** 108 backend tests (17 new for the AI paths: bad dates rejected, out-of-range/malformed/infeasible proposals dropped,
+invalid choices fall back) and the browser smoke test passes with the AI flows. *Not yet verified:* real-model quality and the
+model id — needs your key.

@@ -18,7 +18,9 @@ const ctx = await browser.newContext({
   deviceScaleFactor: 1,
 });
 const page = await ctx.newPage();
-page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}\n${(e.stack ?? "").split("\n").slice(0, 6).join("\n")}`));
+page.on("pageerror", (e) =>
+  errors.push(`pageerror: ${e.message}\n${(e.stack ?? "").split("\n").slice(0, 6).join("\n")}`),
+);
 page.on(
   "console",
   (m) =>
@@ -82,7 +84,7 @@ await shot(page, "04-infeasible-deadline");
 await page.locator('input[type="number"]').first().fill("99999");
 await page.locator('input[type="number"]').nth(1).fill("24");
 await page.getByRole("button", { name: /Find Best Route/ }).click();
-await page.getByText(/enough stock and vehicles/).waitFor({ timeout: 30000 });
+await page.getByText("Cannot be fulfilled").waitFor({ timeout: 30000 });
 
 // 5c. Clearing the destination clears the stale answer; map click pins a new one
 await page.getByRole("button", { name: "Clear destination" }).click();
@@ -111,6 +113,41 @@ for (const [method, path] of [
   assert.equal(r.status(), 404, `${method} ${path} should be 404`);
 }
 assert.equal((await page.request.get(BASE + "/api/health")).status(), 200);
+
+// 5f. AI features (run with AI_E2E=1 against a backend that has Gemma configured, or the test double)
+if (process.env.AI_E2E) {
+  await page
+    .getByRole("button", { name: "Clear destination" })
+    .click()
+    .catch(() => {});
+  await page.getByLabel("Describe the order").fill("300 units to Dhulikhel in 12 hours");
+  await page.getByRole("button", { name: /Fill the form/ }).click();
+  await page.getByText(/Understood: 300 units/).waitFor({ timeout: 15000 });
+  assert.equal(await page.locator('input[type="number"]').first().inputValue(), "300");
+  assert.equal(await page.locator('input[type="number"]').nth(1).inputValue(), "12");
+  await page.getByText("Dhulikhel", { exact: true }).first().waitFor();
+  await page.getByRole("button", { name: /Find Best Route/ }).click();
+  await page.getByText("Risk briefing").waitFor({ timeout: 30000 });
+  await shot(page, "08-ai-risk-briefing");
+  // Stock-limited order: planner-verified options, some proposed by the model
+  await page.locator('input[type="number"]').first().fill("4000");
+  await page.getByRole("button", { name: /Find Best Route/ }).click();
+  await page.getByText("Options that would work").waitFor({ timeout: 30000 });
+  const opts = await page.locator("[aria-label='Options that would work']").innerText();
+  assert.match(opts, /AI suggestion/);
+  assert.match(opts, /Computed/);
+  assert.match(opts, /Verified by the route planner/);
+  await shot(page, "09-ai-options");
+  await page
+    .getByRole("button", { name: /Use this option/ })
+    .first()
+    .click();
+  await page.getByText("Top Recommendation").waitFor({ timeout: 30000 });
+  // Missing information is called out instead of guessed
+  await page.getByLabel("Describe the order").fill("send some stuff soon");
+  await page.getByRole("button", { name: /Fill the form/ }).click();
+  await page.getByText(/Still needed/).waitFor({ timeout: 15000 });
+}
 
 // 6. Other pages
 await page.getByRole("link", { name: "Inventory" }).click();

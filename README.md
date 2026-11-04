@@ -27,8 +27,16 @@ landslide-prone road network, using real road, elevation and rainfall data.
 4. Candidate plans are generated in priority order — one warehouse → several warehouses in parallel → one vehicle visiting
    several (exact TSP) — using shortest-path search. A later tier is explored only if no earlier tier meets the deadline.
 5. **Code** discards plans that miss the deadline and ranks the rest (fewest warehouses → fewest vehicles → lowest cost).
-6. **Gemma** (if configured) may choose among the feasible plans and writes the explanation. If it is unconfigured or
-   fails, a templated explanation of the computed figures is returned, labelled `explanation_source: "deterministic"`.
+6. **Gemma** does the language work, never the arithmetic:
+   * **Order intake** — type *"500 units to Dhulikhel by tomorrow 5 pm"*; Gemma extracts the fields, **code** computes the
+     deadline hours and resolves the place, the dealer confirms.
+   * **Selection + explanation + risk briefing** — chooses among already-feasible plans and writes a briefing grounded in
+     the named riskiest road stretches (hazard, grade, rain figures).
+   * **Options when it can't be delivered** — Gemma proposes partial shipments / adjusted deadlines; **each proposal is
+     re-run through the real planner and shown only if proven feasible**. Code-derived options are always included.
+
+   Set `MARGA_REQUIRE_GEMMA=true` (the AWS stack does this when a key is given) and the service refuses to start without
+   the AI layer. For local development it degrades to labelled rule-based text (`explanation_source: "deterministic"`).
 
 Full design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -59,7 +67,7 @@ backend/gis_backend/   dem.py osm.py hazard.py ingest.py   real-data pipeline (o
                        edge_weight.py routing.py            cost model; Yen + Held-Karp
                        source_selector.py service.py        plan generation, ranking, orchestration
                        gemma_reasoner.py store.py api.py    reasoning layer, inventory DB, HTTP API
-backend/tests/         91 tests (brute-force oracles, real SRTM, API, Gemma/weather with stubbed HTTP)
+backend/tests/         108 tests (brute-force oracles, real SRTM, API, Gemma/weather with stubbed HTTP)
 frontend/src/          routes/ (Plan, Inventory, Data) · components/ · lib/api.ts · routes/api/$.ts (gateway)
 frontend/e2e/smoke.mjs full-site browser smoke test
 infra/marga.cfn.yml    AWS stack · .github/workflows  CI + deploy
@@ -78,7 +86,8 @@ docs/                  ARCHITECTURE · DATA_SOURCES · DEPLOYMENT · STAR (case 
 | Scale | 14,400 nodes / 28,560 edges: 0.06–0.47 s per request | ✅ measured |
 | **Real OSM network built** | Needs outbound access to `overpass-api.de` | ⏳ blocked in the build sandbox |
 | **Live rainfall** | Needs `api.open-meteo.com`; parsing tested with stubbed HTTP | ⏳ not run live |
-| **Gemma end-to-end** | Needs `GEMMA_API_KEY`; parsing/failure paths tested with stubbed HTTP | ⏳ not run live |
+| AI guardrails | Stub-model tests: date maths in code, bad outputs rejected, proposals verified by planner; full UI flow vs a labelled test double | ✅ tested |
+| **Gemma live** | Needs `GEMMA_API_KEY` (prompt quality / model id never exercised against the real API) | ⏳ not run live |
 | **Docker images / AWS stack** | Template passes `cfn-lint`; Dockerfiles built by CI (no Docker daemon in sandbox) | ⏳ not deployed |
 
 ## Limits you should know

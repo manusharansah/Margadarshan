@@ -5,7 +5,8 @@ import { ClientOnly } from "@/components/gis/ClientOnly";
 import { RouteMap, type Pin } from "@/components/map/RouteMap";
 import { DestinationField } from "@/components/plan/DestinationField";
 import { ResultPanel } from "@/components/plan/ResultPanel";
-import { optimizeRoute, useNetwork, useWarehouses } from "@/lib/api";
+import { OrderIntake } from "@/components/plan/OrderIntake";
+import { optimizeRoute, useMeta, useNetwork, useWarehouses } from "@/lib/api";
 import { formatInt } from "@/lib/format";
 import type { OptimizeResponse, Plan } from "@/lib/types";
 
@@ -17,6 +18,7 @@ export const Route = createFileRoute("/")({
 function PlanPage() {
   const { data: network, error: networkError, isLoading } = useNetwork();
   const { data: warehouses = [] } = useWarehouses();
+  const { data: meta } = useMeta();
 
   const [destination, setDestination] = useState<Pin | null>(null);
   const [quantity, setQuantity] = useState(1000);
@@ -50,6 +52,20 @@ function PlanPage() {
     <div className="flex h-full flex-col md:flex-row">
       <aside className="order-2 w-full shrink-0 overflow-y-auto bg-panel px-5 py-5 text-panel-foreground md:order-1 md:w-[360px]">
         <h2 className="mb-4 text-[15px] font-semibold tracking-tight">New Shipment</h2>
+
+        <OrderIntake
+          enabled={meta?.ai_features.order_intake ?? false}
+          onFill={(f) => {
+            if (f.destination)
+              setDestination({
+                name: f.destination.name,
+                lat: f.destination.lat,
+                lng: f.destination.lng,
+              });
+            if (f.quantity != null) setQuantity(f.quantity);
+            if (f.deadline != null) setDeadline(f.deadline);
+          }}
+        />
 
         <form
           className="space-y-3"
@@ -102,6 +118,19 @@ function PlanPage() {
             warehouses={warehouses}
             selected={selected}
             onSelect={setSelected}
+            onApplyRemedy={(q, h) => {
+              if (!destination) return;
+              setQuantity(q);
+              setDeadline(h);
+              setSubmitted({ deadline: h, name: destination.name });
+              run.mutate({
+                destination_lat: destination.lat,
+                destination_lng: destination.lng,
+                destination_name: destination.name,
+                quantity: q,
+                deadline_hours: h,
+              });
+            }}
           />
         )}
 

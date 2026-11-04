@@ -38,6 +38,7 @@ class Selection:
     index: Optional[int]
     explanation: str
     source: str  # "gemma" | "deterministic"
+    risk_note: str = ""
 
 
 def compact(plan: CandidatePlan, name: Callable[[str], str]) -> dict:
@@ -53,8 +54,19 @@ def compact(plan: CandidatePlan, name: Callable[[str], str]) -> dict:
         "distance_km": round(plan.distance_km, 1),
         "worst_hazard_0_to_1": round(max((l.max_hazard for l in plan.legs), default=0.0), 2),
         "legs": [{"from": name(l.source), "units": l.units_carried,
-                  "hours": round(l.time_hours, 2), "km": round(l.distance_km, 1)} for l in plan.legs],
+                  "hours": round(l.time_hours, 2), "km": round(l.distance_km, 1),
+                  "riskiest_stretches": [{k: h[k] for k in ("road", "hazard", "rain_index", "grade_pct", "surface")}
+                                         for h in l.hotspots]} for l in plan.legs],
     }
+
+
+def deterministic_risk_note(plan: CandidatePlan) -> str:
+    spots = sorted((h for l in plan.legs for h in l.hotspots), key=lambda h: -h["hazard"])[:2]
+    if not spots:
+        return "No road stretch on this route was flagged as hazardous."
+    parts = [f"{h['road']} (hazard {h['hazard']:.2f}, {h['grade_pct']:g}% grade, {h['surface']} surface"
+             + (f", rain index {h['rain_index']:.2f}" if h["rain_index"] else "") + ")" for h in spots]
+    return "Watch " + " and ".join(parts) + "; allow extra margin there."
 
 
 class Reasoner:
@@ -90,20 +102,14 @@ class DeterministicReasoner(Reasoner):
         if len(plans) > 1:
             text += (f"{len(plans) - 1} other plan(s) also meet the deadline; this one was ranked first for needing "
                      "the fewest warehouses and vehicles, then the lowest terrain/hazard-weighted route cost.")
-        return Selection(0, text, "deterministic")
+        return Selection(0, text, "deterministic", deterministic_risk_note(p))
 
 
-class LiveGemmaReasoner(Reasoner):
-    """Google AI Studio (Generative Language API). Needs ``GEMMA_API_KEY``."""
+class GemmaClient:
+    """Thin Google AI Studio client returning schema-constrained JSON. Needs ``GEMMA_API_KEY``."""
 
-    name = "gemma"
     ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     DEFAULT_MODEL = "gemma-4-26b-a4b-it"
-    RESPONSE_SCHEMA = {
-        "type": "object",
-        "properties": {"chosen_index": {"type": ["integer", "null"]}, "explanation": {"type": "string"}},
-        "required": ["chosen_index", "explanation"],
-    }
 
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None,
                  endpoint: Optional[str] = None, timeout: float = 30.0,
@@ -118,43 +124,16 @@ class LiveGemmaReasoner(Reasoner):
     def configured(self) -> bool:
         return bool(self.api_key)
 
-    def explain(self, request, plans, feasible, name):
+    def generate_json(self, prompt: str, schema: dict) -> dict:
         if not self.api_key:
             raise RuntimeError("GEMMA_API_KEY is not set")
-        prompt = self._prompt(request, plans, feasible, name)
-        data = self._parse(self._call(prompt))
-        idx = data.get("chosen_index")
-        explanation = str(data.get("explanation", "")).strip()
-        if not explanation:
-            raise RuntimeError("Gemma returned an empty explanation")
-        if feasible and (not isinstance(idx, int) or not 0 <= idx < len(plans)):
-            raise RuntimeError(f"Gemma returned invalid chosen_index {idx!r} for {len(plans)} plans")
-        return Selection(idx if feasible else None, explanation, "gemma")
+        return self._parse(self._call(prompt, schema))
 
-    @staticmethod
-    def _prompt(request, plans, feasible, name) -> str:
-        body = json.dumps([compact(p, name) for p in plans], indent=1)
-        task = (
-            "Every plan below already meets the deadline. Choose the best one (index into the list). Prefer fewer "
-            "warehouses and vehicles unless another plan is clearly safer (lower hazard) or cheaper."
-            if feasible else
-            "No plan meets the deadline. Set chosen_index to null and explain, using only the figures given, why the "
-            "order cannot be fulfilled and what would have to change (deadline, quantity)."
-        )
-        return (
-            "You advise a dealer-delivery planner in Nepal's hills. All numbers are precomputed and verified: do not "
-            "recompute or alter them; reason only over what is given. Write the explanation in 2-4 plain sentences "
-            "for a non-technical dealer.\n\n"
-            f"Order: {request.quantity} units to {request.destination_name} within {request.deadline_hours:g} hours.\n"
-            f"Plans (0-indexed): {body}\n\n{task}\n"
-            'Respond with exactly one JSON object: {"chosen_index": int|null, "explanation": string}'
-        )
-
-    def _call(self, prompt: str) -> str:
+    def _call(self, prompt: str, schema: dict) -> str:
         body = {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json",
-                                 "responseJsonSchema": self.RESPONSE_SCHEMA},
+                                 "responseJsonSchema": schema},
         }
         try:
             r = self._session.post(self.endpoint.format(model=self.model), params={"key": self.api_key},
@@ -192,6 +171,58 @@ class LiveGemmaReasoner(Reasoner):
         raise RuntimeError("Gemma did not return valid JSON")
 
 
+class LiveGemmaReasoner(GemmaClient, Reasoner):
+    """Selects among deadline-feasible plans and writes the explanation + grounded risk briefing."""
+
+    name = "gemma"
+    RESPONSE_SCHEMA = {
+        "type": "object",
+        "properties": {"chosen_index": {"type": ["integer", "null"]}, "explanation": {"type": "string"},
+                       "risk_note": {"type": "string"}},
+        "required": ["chosen_index", "explanation"],
+    }
+
+    def explain(self, request, plans, feasible, name):
+        data = self.generate_json(self._prompt(request, plans, feasible, name), self.RESPONSE_SCHEMA)
+        idx = data.get("chosen_index")
+        explanation = str(data.get("explanation", "")).strip()
+        if not explanation:
+            raise RuntimeError("Gemma returned an empty explanation")
+        if feasible and (not isinstance(idx, int) or isinstance(idx, bool) or not 0 <= idx < len(plans)):
+            raise RuntimeError(f"Gemma returned invalid chosen_index {idx!r} for {len(plans)} plans")
+        chosen = plans[idx] if feasible else None
+        risk = str(data.get("risk_note", "")).strip() or (deterministic_risk_note(chosen) if chosen else "")
+        return Selection(idx if feasible else None, explanation, "gemma", risk)
+
+    @staticmethod
+    def _prompt(request, plans, feasible, name) -> str:
+        body = json.dumps([compact(p, name) for p in plans], indent=1)
+        task = (
+            "Every plan below already meets the deadline. Choose the best one (index into the list). Prefer fewer "
+            "warehouses and vehicles unless another plan is clearly safer (lower hazard) or cheaper. Also write "
+            "risk_note: 1-2 sentences for the driver/dealer about the chosen plan's riskiest stretches, naming the roads "
+            "from riskiest_stretches and citing their hazard, grade or rain figures. Use ONLY those listed stretches; "
+            "if none are listed say no stretch was flagged."
+            if feasible else
+            "No plan meets the deadline. Set chosen_index to null and explain, using only the figures given, why the "
+            "order cannot be fulfilled and what would have to change (deadline, quantity). Leave risk_note empty."
+        )
+        return (
+            "You advise a dealer-delivery planner in Nepal's hills. All numbers are precomputed and verified: do not "
+            "recompute or alter them; reason only over what is given. Write the explanation in 2-4 plain sentences "
+            "for a non-technical dealer.\n\n"
+            f"Order: {request.quantity} units to {request.destination_name} within {request.deadline_hours:g} hours.\n"
+            f"Plans (0-indexed): {body}\n\n{task}\n"
+            'Respond with exactly one JSON object: {"chosen_index": int|null, "explanation": string, "risk_note": string}'
+        )
+
+
 def get_reasoner() -> Reasoner:
     live = LiveGemmaReasoner()
     return live if live.configured else DeterministicReasoner()
+
+
+def get_client() -> Optional["LiveGemmaReasoner"]:
+    """The one AI object (client + reasoner) when GEMMA_API_KEY is set, else None."""
+    c = LiveGemmaReasoner()
+    return c if c.configured else None

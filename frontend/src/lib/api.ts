@@ -4,6 +4,7 @@ import type {
   NetworkGeoJSON,
   OptimizeRequest,
   OptimizeResponse,
+  ParsedOrder,
   Place,
   Warehouse,
 } from "./types";
@@ -37,6 +38,13 @@ export const optimizeRoute = (body: OptimizeRequest) =>
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
+  });
+
+export const parseOrder = (text: string) =>
+  request<ParsedOrder>("/parse-order", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text }),
   });
 
 export const useMeta = () =>

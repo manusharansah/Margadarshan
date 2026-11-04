@@ -17,6 +17,13 @@ export interface RouteLeg {
   descent_m: number;
   geometry: LatLngElev[];
   pickups: string[];
+  hotspots: {
+    road: string;
+    hazard: number;
+    rain_index: number;
+    grade_pct: number;
+    surface: string;
+  }[];
 }
 
 export interface Plan {
@@ -36,6 +43,9 @@ export interface OptimizeResponse {
   status: "feasible" | "infeasible";
   explanation: string;
   explanation_source: "gemma" | "deterministic";
+  risk_note: string;
+  remedies: Remedy[];
+  remedy_error?: string;
   destination: {
     name: string;
     lat: number;
@@ -54,6 +64,30 @@ export interface OptimizeResponse {
   warnings: string[];
   weather: WeatherStatus | null;
   gemma_error?: string;
+}
+
+export interface Remedy {
+  source: "computed" | "gemma";
+  kind: string;
+  quantity: number;
+  deadline_hours: number;
+  eta_hours: number;
+  plan_type: PlanType;
+  sources: string[];
+  vehicles: number;
+  rationale: string;
+  verified: boolean;
+}
+
+export interface ParsedOrder {
+  quantity: number | null;
+  deadline_hours: number | null;
+  destination: Place | null;
+  destination_candidates: Place[];
+  destination_text: string | null;
+  missing: string[];
+  issues: string[];
+  notes: string;
 }
 
 export interface OptimizeRequest {
@@ -88,6 +122,12 @@ export interface Meta {
   weather: Partial<WeatherStatus> & { available: boolean };
   warehouses: number;
   reasoner: "gemma" | "deterministic";
+  ai_features: {
+    explanations: boolean;
+    order_intake: boolean;
+    remedies: boolean;
+    required: boolean;
+  };
 }
 
 export interface Warehouse {

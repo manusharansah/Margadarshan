@@ -150,6 +150,7 @@ Resources:
             - { Name: MARGA_NETWORK_S3_URI, Value: !Sub "s3://${DataBucket}/network.json.gz" }
             - { Name: DB_HOST, Value: !GetAtt Db.Endpoint.Address }
             - { Name: CORS_ORIGINS, Value: "" }
+            - !If [HasGemma, { Name: MARGA_REQUIRE_GEMMA, Value: "true" }, !Ref "AWS::NoValue"]
           Secrets:
             - { Name: MARGA_ADMIN_API_KEY, ValueFrom: !Ref AdminKeySecret }
             - { Name: DB_PASSWORD, ValueFrom: !Sub "${DbSecret}:password::" }

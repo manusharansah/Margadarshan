@@ -23,6 +23,7 @@ class Settings:
     admin_api_key: str = field(default_factory=lambda: os.environ.get("MARGA_ADMIN_API_KEY", ""))
     weather_enabled: bool = field(default_factory=lambda: _bool("MARGA_WEATHER_ENABLED", True))
     weather_ttl_seconds: int = field(default_factory=lambda: int(os.environ.get("MARGA_WEATHER_TTL", "1800")))
+    require_gemma: bool = field(default_factory=lambda: _bool("MARGA_REQUIRE_GEMMA", False))
     loading_hours_per_stop: float = field(default_factory=lambda: float(os.environ.get("MARGA_LOADING_HOURS", "0")))
 
     @property

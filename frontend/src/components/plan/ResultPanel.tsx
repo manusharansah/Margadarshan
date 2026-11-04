@@ -18,6 +18,7 @@ interface Props {
   warehouses: Warehouse[];
   selected: Plan | null;
   onSelect: (plan: Plan) => void;
+  onApplyRemedy: (quantity: number, deadline: number) => void;
 }
 
 /** Result area of the left panel: verdict card, "Top Recommendation", alternatives, explanation dialog. */
@@ -28,6 +29,7 @@ export function ResultPanel({
   warehouses,
   selected,
   onSelect,
+  onApplyRemedy,
 }: Props) {
   const [explainOpen, setExplainOpen] = useState(false);
   const [showAll, setShowAll] = useState(false);
@@ -54,6 +56,36 @@ export function ResultPanel({
             </p>
           )}
         </div>
+        {result.remedies.length > 0 && (
+          <div className="mt-4" aria-label="Options that would work">
+            <h4 className="mb-2 text-[13px] font-semibold">Options that would work</h4>
+            <ul className="space-y-2">
+              {result.remedies.map((r, i) => (
+                <li key={i} className="rounded-md border border-panel-border p-3 text-[13px]">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-medium">
+                      {formatInt(r.quantity)} units · {r.deadline_hours} h
+                    </span>
+                    <span className="rounded-full border border-panel-border px-1.5 py-0.5 text-[10px] font-semibold text-panel-muted">
+                      {r.source === "gemma" ? "AI suggestion" : "Computed"}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[12px] leading-snug text-panel-muted">{r.rationale}</p>
+                  <p className="mt-1 text-[11px] text-panel-muted">
+                    Verified by the route planner: arrives in {formatHours(r.eta_hours)} via{" "}
+                    {r.sources.join(" + ")}.
+                  </p>
+                  <button
+                    onClick={() => onApplyRemedy(r.quantity, r.deadline_hours)}
+                    className="mt-2 flex w-full items-center justify-between rounded-md border border-panel-foreground px-3 py-1.5 text-[12px] font-medium hover:bg-panel-foreground hover:text-panel"
+                  >
+                    Use this option <span aria-hidden>→</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         <Notices result={result} />
       </>
     );
@@ -98,6 +130,19 @@ export function ResultPanel({
             {hazard.label}
           </span>
         </div>
+
+        {result.risk_note && (
+          <p className="mt-3 text-[12px] leading-snug text-panel-muted" aria-label="Risk briefing">
+            <span className="font-semibold text-panel-foreground">Risk briefing</span>
+            {result.explanation_source === "gemma" && (
+              <span className="ml-1.5 rounded-full border border-panel-border px-1.5 py-0.5 text-[10px]">
+                AI
+              </span>
+            )}
+            <br />
+            {result.risk_note}
+          </p>
+        )}
 
         <button
           onClick={() => setExplainOpen(true)}

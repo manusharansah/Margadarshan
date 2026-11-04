@@ -51,3 +51,15 @@ path exists — equivalent results, ~100× faster (see STAR.md).
 * The UI labels fixture data, rule-based vs Gemma explanations, and missing rainfall.
 * The public gateway forwards only 5 read endpoints and the optimiser; inventory writes need `X-API-Key` and are
   unreachable from the website.
+
+## Where the AI contributes (and where it may not)
+
+| Feature | What Gemma does | What code does (authoritative) |
+|---|---|---|
+| Order intake `POST /parse-order` | extracts destination text, quantity, deadline *as written* | all date arithmetic (Nepal time), range checks, place lookup; form is pre-filled, never auto-run |
+| Plan choice + explanation | picks one index among deadline-feasible plans; writes 2–4 sentences | feasibility, ranking policy, index validation, fallback if invalid |
+| Risk briefing | summarises the named riskiest stretches | computes the stretches (hazard, grade, rain) from the road graph |
+| Remedies when infeasible | proposes alternative (quantity, deadline) pairs with a rationale | **re-runs the planner on every proposal**; unproven ones are dropped; computed options always shown |
+
+Guardrails are unit-tested with a stub model (`tests/test_ai_features.py`). `scripts/fake_gemma_server.py` is a labelled
+test double for end-to-end runs without a key — it checks wiring, not language quality.

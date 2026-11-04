@@ -14,10 +14,14 @@ because nothing the dealer needs is missing.
 """
 from __future__ import annotations
 
-from dataclasses import asdict
-from typing import Dict, List, Optional
+import json
+import math
+from dataclasses import asdict, replace
+from typing import Callable, Dict, List, Optional
 
-from .gemma_reasoner import DeterministicReasoner, Reasoner, compact, get_reasoner
+from .gemma_reasoner import (
+    DeterministicReasoner, GemmaClient, Reasoner, compact, deterministic_risk_note, get_reasoner,
+)
 from .models import CandidatePlan, DeliveryRequest, StorageNode
 from .network import Network
 from .source_selector import PlanContext, generate_plans
@@ -42,8 +46,103 @@ def plan_json(plan: CandidatePlan, with_geometry: bool = True) -> dict:
     return d
 
 
+REMEDY_SCHEMA = {
+    "type": "object",
+    "properties": {"proposals": {"type": "array", "maxItems": 3, "items": {
+        "type": "object",
+        "properties": {"quantity": {"type": "integer"}, "deadline_hours": {"type": "number"},
+                       "rationale": {"type": "string"}},
+        "required": ["quantity", "deadline_hours", "rationale"]}}},
+    "required": ["proposals"],
+}
+
+
+def _rank(plans: List[CandidatePlan]) -> List[CandidatePlan]:
+    return sorted((p for p in plans if p.meets_deadline), key=policy_key)
+
+
+def verify_remedy(network: Network, usable: Dict[str, StorageNode], dest_node: int, req: DeliveryRequest,
+                  nm: Callable[[str], str], source: str, kind: str, rationale: str) -> Optional[dict]:
+    """Run the real planner on an alternative order; return it only if it is genuinely feasible."""
+    if req.quantity <= 0 or not (0 < req.deadline_hours <= 720):
+        return None
+    best = _rank(generate_plans(PlanContext(network.graph, usable, dest_node, req)))
+    if not best:
+        return None
+    p = best[0]
+    return {"source": source, "kind": kind, "quantity": req.quantity, "deadline_hours": round(req.deadline_hours, 2),
+            "eta_hours": round(p.total_time_hours, 2), "plan_type": p.plan_type,
+            "sources": [nm(x) for x in p.sources_used], "vehicles": p.vehicles_used, "rationale": rationale,
+            "verified": True}
+
+
+def computed_remedies(network, usable, dest_node, request, plans, nm) -> List[dict]:
+    """Code-derived options (no AI): a longer deadline, or the largest quantity that fits the deadline."""
+    out: List[dict] = []
+    if plans:
+        h = min(720.0, math.ceil(min(p.total_time_hours for p in plans) * 2) / 2)
+        r = verify_remedy(network, usable, dest_node, replace(request, deadline_hours=h), nm, "computed",
+                          "extend_deadline", f"Same {request.quantity} units, deadline moved to {h:g} h.")
+        if r:
+            out.append(r)
+    lo, hi, best_q = 0, request.quantity - 1, 0
+    for _ in range(8):  # bisection on quantity; every candidate is run through the real planner
+        if hi <= lo:
+            break
+        mid = (lo + hi + 1) // 2
+        if _rank(generate_plans(PlanContext(network.graph, usable, dest_node, replace(request, quantity=mid)))):
+            lo = best_q = mid
+        else:
+            hi = mid - 1
+    if best_q > 0:
+        r = verify_remedy(network, usable, dest_node, replace(request, quantity=best_q), nm, "computed",
+                          "reduce_quantity",
+                          f"Ship {best_q} units now within {request.deadline_hours:g} h; {request.quantity - best_q} remain.")
+        if r:
+            out.append(r)
+    return out
+
+
+def gemma_remedies(client: GemmaClient, network, usable, dest_node, request, plans, anchors, nm) -> List[dict]:
+    """Gemma proposes business-sensible alternatives; each is accepted only if the planner proves it feasible."""
+    facts = {
+        "order": {"quantity": request.quantity, "deadline_hours": request.deadline_hours,
+                  "destination": request.destination_name},
+        "fastest_possible_hours": round(min((p.total_time_hours for p in plans), default=0), 2) or None,
+        "network_stock_units": sum(w.units_in_stock for w in usable.values()),
+        "network_vehicles": sum(w.vehicles_available for w in usable.values()),
+        "already_verified_options": [{k: a[k] for k in ("kind", "quantity", "deadline_hours")} for a in anchors],
+        "closest_plans": [compact(p, nm) for p in sorted(plans, key=lambda p: p.total_time_hours)[:3]],
+    }
+    prompt = (
+        "A dealer's order cannot be delivered as requested. Propose up to 3 DIFFERENT practical alternatives a dealer "
+        "might accept - e.g. a partial shipment now with the rest later, a modestly later deadline, or a smaller order. "
+        "Each has an integer quantity (<= the original), a deadline_hours, and a one-sentence rationale in plain language. "
+        "Do not repeat the already-verified options. Do not claim any option works: they will be checked by the "
+        f"routing engine.\nFacts: {json.dumps(facts)}\n"
+        'Respond with exactly one JSON object: {"proposals": [{"quantity": int, "deadline_hours": number, "rationale": string}]}'
+    )
+    data = client.generate_json(prompt, REMEDY_SCHEMA)
+    seen = {(a["quantity"], a["deadline_hours"]) for a in anchors}
+    out: List[dict] = []
+    for pr in data.get("proposals", [])[:3]:
+        try:
+            q, h, why = int(pr["quantity"]), float(pr["deadline_hours"]), str(pr["rationale"]).strip()
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (0 < q <= request.quantity) or (q, round(h, 2)) in seen:
+            continue
+        r = verify_remedy(network, usable, dest_node, replace(request, quantity=q, deadline_hours=h), nm, "gemma",
+                          "split_or_adjust", why)
+        if r:
+            seen.add((q, r["deadline_hours"]))
+            out.append(r)
+    return out
+
+
 def process_request(network: Network, warehouses: List[StorageNode], request: DeliveryRequest,
-                    reasoner: Optional[Reasoner] = None, weather: Optional[dict] = None) -> dict:
+                    reasoner: Optional[Reasoner] = None, weather: Optional[dict] = None,
+                    client: Optional[GemmaClient] = None) -> dict:
     warnings: List[str] = []
     dest_node, dest_snap_m = network.snap(request.destination_lat, request.destination_lng)
     dn = network.nodes[dest_node]
@@ -78,8 +177,20 @@ def process_request(network: Network, warehouses: List[StorageNode], request: De
     ranked = ([chosen] + [p for p in feasible if p is not chosen]) if chosen else []
     policy_choice = feasible[0] if feasible else None
 
+    remedies: List[dict] = []
+    remedy_error: Optional[str] = None
+    if not chosen and usable:
+        remedies = computed_remedies(network, usable, dest_node, request, plans, nm)
+        if client is not None:
+            try:
+                remedies += gemma_remedies(client, network, usable, dest_node, request, plans, remedies, nm)
+            except Exception as exc:  # noqa: BLE001 - AI proposals are a bonus; computed options still stand
+                remedy_error = str(exc)
+
     out = {
         "status": "feasible" if chosen else "infeasible",
+        "risk_note": sel.risk_note or (deterministic_risk_note(chosen) if chosen else ""),
+        "remedies": remedies,
         "explanation": sel.explanation,
         "explanation_source": sel.source,
         "destination": {"name": request.destination_name, "lat": request.destination_lat,
@@ -98,4 +209,6 @@ def process_request(network: Network, warehouses: List[StorageNode], request: De
     }
     if gemma_error:
         out["gemma_error"] = gemma_error
+    if remedy_error:
+        out["remedy_error"] = remedy_error
     return out

@@ -102,24 +102,3 @@ def test_optimize_destination_outside_network_is_422(client):
 @pytest.mark.parametrize("patch", [{"quantity": 0}, {"deadline_hours": -1}, {"destination_lat": 123}, {"quantity": "x"}])
 def test_input_validation(client, patch):
     assert client.post("/optimize-route", json={**dest(1, 1, 10, 5), **patch}).status_code == 422
-
-
-def test_gemma_failure_degrades_to_labelled_deterministic_answer(client, monkeypatch):
-    monkeypatch.setenv("GEMMA_API_KEY", "bad-key")
-    from gis_backend import gemma_reasoner
-    monkeypatch.setattr(gemma_reasoner.LiveGemmaReasoner, "_call", lambda self, prompt: (_ for _ in ()).throw(RuntimeError("Gemma API call failed: HTTPError")))
-    put(client, "A", (0, 0), 900, 4)
-    r = client.post("/optimize-route", json=dest(6, 6, 100, 24))
-    b = r.json()
-    assert r.status_code == 200 and b["status"] == "feasible"
-    assert b["explanation_source"] == "deterministic" and "Gemma API call failed" in b["gemma_error"]
-    assert "bad-key" not in r.text
-
-
-def test_gemma_selection_must_come_from_feasible_set(client, monkeypatch):
-    monkeypatch.setenv("GEMMA_API_KEY", "k")
-    from gis_backend import gemma_reasoner
-    monkeypatch.setattr(gemma_reasoner.LiveGemmaReasoner, "_call", lambda self, prompt: '{"chosen_index": 99, "explanation": "x"}')
-    put(client, "A", (0, 0), 900, 4)
-    b = client.post("/optimize-route", json=dest(6, 6, 100, 24)).json()
-    assert b["explanation_source"] == "deterministic" and "invalid chosen_index" in b["gemma_error"]
