@@ -1,6 +1,6 @@
-import { AlertTriangle, CheckCircle2, ChevronDown, Info, XCircle } from "lucide-react";
 import { useState } from "react";
 import { ElevationProfile } from "./ElevationProfile";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   PLAN_LABEL,
   formatHours,
@@ -14,12 +14,23 @@ import type { OptimizeResponse, Plan, Warehouse } from "@/lib/types";
 interface Props {
   result: OptimizeResponse;
   deadline: number;
+  destinationName: string;
   warehouses: Warehouse[];
   selected: Plan | null;
   onSelect: (plan: Plan) => void;
 }
 
-export function ResultPanel({ result, deadline, warehouses, selected, onSelect }: Props) {
+/** Result area of the left panel: verdict card, "Top Recommendation", alternatives, explanation dialog. */
+export function ResultPanel({
+  result,
+  deadline,
+  destinationName,
+  warehouses,
+  selected,
+  onSelect,
+}: Props) {
+  const [explainOpen, setExplainOpen] = useState(false);
+  const [showAll, setShowAll] = useState(false);
   const nameOf = (id: string) =>
     id
       .split("+")
@@ -30,224 +41,239 @@ export function ResultPanel({ result, deadline, warehouses, selected, onSelect }
     const suggested =
       result.best_case_hours != null ? Math.ceil(result.best_case_hours * 2) / 2 : null;
     return (
-      <div className="space-y-3">
-        <div className="flex gap-3 rounded-xl border border-destructive/30 bg-destructive/5 p-4">
-          <XCircle className="mt-0.5 size-5 shrink-0 text-destructive" aria-hidden />
-          <div className="space-y-1.5">
-            <p className="font-semibold">Can't be delivered as requested</p>
-            <p className="text-sm leading-relaxed text-muted-foreground">{result.explanation}</p>
-            {suggested != null && (
-              <p className="text-sm">
-                Fastest possible: <strong>{formatHours(result.best_case_hours!)}</strong> — try a
-                deadline of at least <strong>{suggested} h</strong>.
-              </p>
-            )}
-          </div>
+      <>
+        <div className="mt-5 rounded-lg border border-panel-border p-4">
+          <p className="text-[13px] font-semibold uppercase tracking-wide text-hazard">
+            Cannot be fulfilled
+          </p>
+          <p className="mt-2 text-[13px] leading-relaxed text-panel-muted">{result.explanation}</p>
+          {suggested != null && (
+            <p className="mt-2 text-[13px]">
+              Fastest possible is {formatHours(result.best_case_hours!)} — try a deadline of at
+              least {suggested} h.
+            </p>
+          )}
         </div>
         <Notices result={result} />
-      </div>
+      </>
     );
   }
 
   const plan = selected ?? result.chosen_plan;
-  const isTop = plan === result.chosen_plan;
-  const hazard = hazardLevel(Math.max(...plan.legs.map((l) => l.max_hazard), 0));
-  const margin = deadline - plan.total_time_hours;
+  const all = [result.chosen_plan, ...result.alternatives];
+  const worst = Math.max(...plan.legs.map((l) => l.max_hazard), 0);
+  const hazard = hazardLevel(worst);
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-start gap-3 rounded-xl border border-positive/30 bg-positive/5 p-4">
-        <CheckCircle2 className="mt-0.5 size-5 shrink-0 text-positive" aria-hidden />
-        <div>
-          <p className="font-semibold">Arrives in {formatHours(plan.total_time_hours)}</p>
-          <p className="text-sm text-muted-foreground">
-            {formatHours(margin)} inside the {deadline} h deadline ·{" "}
-            {isTop ? "Recommended" : "Alternative"} plan
+    <>
+      <div className="mt-5 rounded-lg border border-panel-border p-4">
+        <h3 className="mb-3 text-[15px] font-semibold">
+          {plan === result.chosen_plan ? "Top Recommendation" : "Alternative Plan"}
+        </h3>
+
+        <div className="rounded-md border border-panel-border px-3 py-3">
+          <p className="text-[14px] font-medium">{PLAN_LABEL[plan.plan_type]}</p>
+          <p className="mt-1 text-[12px] text-panel-muted">
+            {plan.sources_used.map(nameOf).join(" + ")} → {destinationName}
           </p>
         </div>
+
+        <div className="mt-3 grid grid-cols-3 divide-x divide-[var(--panel-border)] border-y border-panel-border">
+          <Metric label="ETA" value={formatHours(plan.total_time_hours)} />
+          <Metric label="Vehicles" value={String(plan.vehicles_used)} />
+          <Metric label="Fuel est." value={formatLitres(plan.fuel_litres)} />
+        </div>
+
+        <div className="mt-3 grid grid-cols-2 gap-3 text-[12px] text-panel-muted">
+          <span>Units: {formatInt(plan.total_units)}</span>
+          <span>Distance: {formatKm(plan.distance_km)}</span>
+          <span>Deadline: {deadline} h</span>
+          <span className="flex items-center gap-1.5">
+            Hazard:{" "}
+            <span
+              className="size-2 rounded-full"
+              style={{ background: hazard.colour }}
+              aria-hidden
+            />
+            {hazard.label}
+          </span>
+        </div>
+
+        <button
+          onClick={() => setExplainOpen(true)}
+          className="mt-3 flex w-full items-center justify-between rounded-md border border-panel-foreground px-4 py-2.5 text-[14px] font-medium text-panel-foreground transition-colors hover:bg-panel-foreground hover:text-panel"
+        >
+          Why this plan? See full explanation
+          <span aria-hidden>→</span>
+        </button>
       </div>
 
-      <dl className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-border bg-border text-sm">
-        <Stat label="Distance" value={formatKm(plan.distance_km)} />
-        <Stat label="Fuel (est.)" value={formatLitres(plan.fuel_litres)} />
-        <Stat label="Vehicles" value={String(plan.vehicles_used)} />
-        <Stat
-          label="Road hazard"
-          value={hazard.label}
-          dot={hazard.colour}
-          hint={`worst stretch ${Math.max(...plan.legs.map((l) => l.max_hazard), 0).toFixed(2)} / 1`}
-        />
-      </dl>
-
-      <section aria-label="Route">
-        <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          {PLAN_LABEL[plan.plan_type]}
-        </h3>
-        <ol className="space-y-1.5">
-          {plan.legs.map((leg, i) => (
-            <li
-              key={i}
-              className="flex items-baseline justify-between gap-3 rounded-lg bg-muted/60 px-3 py-2 text-sm"
-            >
-              <span className="min-w-0 truncate font-medium">{nameOf(leg.source)}</span>
-              <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
-                {formatInt(leg.units_carried)} units · {formatHours(leg.time_hours)}
-              </span>
-            </li>
-          ))}
-        </ol>
-      </section>
-
-      <ElevationProfile plan={plan} />
-
-      <section className="rounded-xl border border-border p-4" aria-label="Explanation">
-        <div className="mb-2 flex items-center justify-between">
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            Why this plan
-          </h3>
-          <SourceBadge source={result.explanation_source} />
-        </div>
-        <p className="text-sm leading-relaxed">{result.explanation}</p>
-        {result.gemma_error && (
-          <p className="mt-2 text-xs text-muted-foreground">
-            Gemma unavailable, so this summary was generated from the computed figures:{" "}
-            {result.gemma_error}
-          </p>
-        )}
-        {result.chosen_matches_policy === false && (
-          <p className="mt-2 text-xs text-muted-foreground">
-            Gemma preferred this plan over the rule-based top choice.
-          </p>
-        )}
-      </section>
-
       {result.alternatives.length > 0 && (
-        <Alternatives result={result} selected={plan} onSelect={onSelect} nameOf={nameOf} />
+        <div className="mt-4" aria-label="Alternative plans">
+          <h4 className="mb-2 text-[13px] font-semibold">Other Feasible Plans</h4>
+          <ul className="space-y-1">
+            {(showAll ? all : all.slice(0, 4)).map((p, i) => (
+              <li key={i}>
+                <button
+                  onClick={() => onSelect(p)}
+                  className={`flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-[13px] transition-colors ${
+                    p === plan
+                      ? "bg-panel-foreground text-panel"
+                      : "text-panel-muted hover:bg-[var(--panel-border)]"
+                  }`}
+                >
+                  <span className="truncate">
+                    {i + 1}. {p.sources_used.map(nameOf).join(" + ")}
+                  </span>
+                  <span className="ml-2 shrink-0 tabular-nums">
+                    {formatHours(p.total_time_hours)}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+          {all.length > 4 && (
+            <button
+              onClick={() => setShowAll((v) => !v)}
+              className="mt-2 w-full rounded-md border border-panel-border px-3 py-2 text-[13px] text-panel-muted hover:text-panel-foreground"
+            >
+              {showAll ? "Show fewer" : `View all ${all.length} ranked options`}
+            </button>
+          )}
+        </div>
       )}
       <Notices result={result} />
-    </div>
-  );
-}
 
-function Alternatives({
-  result,
-  selected,
-  onSelect,
-  nameOf,
-}: {
-  result: OptimizeResponse;
-  selected: Plan;
-  onSelect: (p: Plan) => void;
-  nameOf: (s: string) => string;
-}) {
-  const [open, setOpen] = useState(false);
-  const all = [result.chosen_plan!, ...result.alternatives];
-  return (
-    <section aria-label="Alternative plans">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center justify-between text-xs font-semibold uppercase tracking-wide text-muted-foreground"
-        aria-expanded={open}
-      >
-        Other feasible plans ({result.alternatives_total})
-        <ChevronDown
-          className={`size-4 transition-transform ${open ? "rotate-180" : ""}`}
-          aria-hidden
-        />
-      </button>
-      {open && (
-        <ul className="mt-2 space-y-1">
-          {all.map((p, i) => (
-            <li key={i}>
-              <button
-                type="button"
-                onClick={() => onSelect(p)}
-                className={`flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2 text-left text-sm transition-colors ${
-                  p === selected ? "bg-primary text-primary-foreground" : "hover:bg-muted"
-                }`}
-              >
-                <span className="min-w-0 truncate">{p.sources_used.map(nameOf).join(" + ")}</span>
-                <span className="shrink-0 text-xs tabular-nums opacity-80">
-                  {formatHours(p.total_time_hours)} · {p.vehicles_used} veh
-                </span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
+      <Dialog open={explainOpen} onOpenChange={setExplainOpen}>
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Why this plan?</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <p className="text-[14px] font-medium">{PLAN_LABEL[plan.plan_type]}</p>
+              <p className="mt-1 text-[13px] text-muted-foreground">
+                {plan.sources_used.map(nameOf).join(" + ")} → {destinationName}
+              </p>
+            </div>
+            <div className="grid grid-cols-2 gap-x-8 gap-y-4 sm:grid-cols-3">
+              <Factor
+                label="Arrival"
+                value={formatHours(plan.total_time_hours)}
+                hint={`Within the ${deadline} h deadline`}
+              />
+              <Factor
+                label="Sources used"
+                value={String(plan.sources_used.length)}
+                hint="Fewest warehouses that satisfy the order"
+              />
+              <Factor
+                label="Route cost"
+                value={plan.total_edge_cost.toFixed(1)}
+                hint="Length, surface, grade, hazard"
+              />
+              <Factor
+                label="Distance"
+                value={formatKm(plan.distance_km)}
+                hint="Along mapped roads"
+              />
+              <Factor
+                label="Fuel estimate"
+                value={formatLitres(plan.fuel_litres)}
+                hint="Base use + climb energy"
+              />
+              <Factor
+                label="Worst hazard"
+                value={`${hazard.label} (${worst.toFixed(2)})`}
+                hint="0 = safe, 1 = severe"
+              />
+            </div>
+
+            <div>
+              <p className="mb-2 text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Route legs
+              </p>
+              <ul className="space-y-1.5">
+                {plan.legs.map((leg, i) => (
+                  <li key={i} className="rounded-md border border-border px-3 py-2 text-[13px]">
+                    <span className="font-medium">{nameOf(leg.source)}</span>
+                    <span className="text-muted-foreground">
+                      {" "}
+                      · {formatInt(leg.units_carried)} units · {leg.vehicles_used} vehicle(s) ·{" "}
+                      {formatHours(leg.time_hours)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            <div>
+              <p className="mb-2 text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Elevation along the route
+              </p>
+              <ElevationProfile plan={plan} />
+            </div>
+
+            <div className="border-t border-border pt-4">
+              <p className="mb-2 text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">
+                {result.explanation_source === "gemma"
+                  ? "Gemma reasoning"
+                  : "Selection reasoning (rule-based)"}
+              </p>
+              <p className="text-[13px] leading-relaxed text-foreground">{result.explanation}</p>
+              {result.gemma_error && (
+                <p className="mt-2 text-[12px] text-muted-foreground">
+                  Gemma unavailable: {result.gemma_error}
+                </p>
+              )}
+              {result.chosen_matches_policy === false && (
+                <p className="mt-2 text-[12px] text-muted-foreground">
+                  Gemma preferred this plan over the rule-based top choice.
+                </p>
+              )}
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
 function Notices({ result }: { result: OptimizeResponse }) {
-  const notes: { icon: "warn" | "info"; text: string }[] = result.warnings.map((text) => ({
-    icon: "warn",
-    text,
-  }));
+  const notes = [...result.warnings];
   if (result.destination.snap_distance_m > 500)
-    notes.push({
-      icon: "info",
-      text: `Destination is ${(result.destination.snap_distance_m / 1000).toFixed(1)} km from the nearest mapped road; the route ends at that road.`,
-    });
+    notes.push(
+      `Destination is ${(result.destination.snap_distance_m / 1000).toFixed(1)} km from the nearest mapped road; the route ends at that road.`,
+    );
   if (result.weather && !result.weather.available)
-    notes.push({
-      icon: "info",
-      text: "Live rainfall unavailable — hazard uses terrain and incident data only.",
-    });
+    notes.push("Live rainfall unavailable — hazard uses terrain and incident data only.");
   if (!notes.length) return null;
   return (
-    <ul className="space-y-1.5">
+    <ul className="mt-4 space-y-1.5">
       {notes.map((n, i) => (
-        <li key={i} className="flex gap-2 text-xs text-muted-foreground">
-          {n.icon === "warn" ? (
-            <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden />
-          ) : (
-            <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-          )}
-          <span>{n.text}</span>
+        <li key={i} className="text-[12px] leading-snug text-panel-muted">
+          ⓘ {n}
         </li>
       ))}
     </ul>
   );
 }
 
-function SourceBadge({ source }: { source: "gemma" | "deterministic" }) {
+function Metric({ label, value }: { label: string; value: string }) {
   return (
-    <span
-      className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-        source === "gemma" ? "bg-accent text-accent-foreground" : "bg-muted text-muted-foreground"
-      }`}
-      title={
-        source === "gemma"
-          ? "Selected and explained by Gemma"
-          : "Rule-based summary of the computed figures"
-      }
-    >
-      {source === "gemma" ? "Gemma" : "Rule-based"}
-    </span>
+    <div className="px-2 py-2.5">
+      <p className="text-[11px] text-panel-muted">{label}</p>
+      <p className="mt-0.5 text-[14px] font-medium tabular-nums">{value}</p>
+    </div>
   );
 }
 
-function Stat({
-  label,
-  value,
-  hint,
-  dot,
-}: {
-  label: string;
-  value: string;
-  hint?: string;
-  dot?: string;
-}) {
+function Factor({ label, value, hint }: { label: string; value: string; hint: string }) {
   return (
-    <div className="bg-card px-3 py-2.5">
-      <dt className="text-[11px] text-muted-foreground">{label}</dt>
-      <dd className="mt-0.5 flex items-center gap-1.5 font-semibold tabular-nums">
-        {dot && <span className="size-2 rounded-full" style={{ background: dot }} aria-hidden />}
-        {value}
-      </dd>
-      {hint && <p className="text-[10px] text-muted-foreground">{hint}</p>}
+    <div>
+      <p className="text-[12px] text-muted-foreground">{label}</p>
+      <p className="mt-1 text-[15px] leading-tight font-semibold tabular-nums">{value}</p>
+      <p className="mt-1 text-[11px] leading-snug text-muted-foreground">{hint}</p>
     </div>
   );
 }

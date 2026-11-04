@@ -1,26 +1,29 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation } from "@tanstack/react-query";
-import { Loader2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ClientOnly } from "@/components/gis/ClientOnly";
 import { RouteMap, type Pin } from "@/components/map/RouteMap";
 import { DestinationField } from "@/components/plan/DestinationField";
 import { ResultPanel } from "@/components/plan/ResultPanel";
 import { optimizeRoute, useNetwork, useWarehouses } from "@/lib/api";
+import { formatInt } from "@/lib/format";
 import type { OptimizeResponse, Plan } from "@/lib/types";
 
-export const Route = createFileRoute("/")({ component: PlanPage });
+export const Route = createFileRoute("/")({
+  head: () => ({ meta: [{ title: "MargaAI Nepal — Delivery Route Optimizer" }] }),
+  component: PlanPage,
+});
 
 function PlanPage() {
   const { data: network, error: networkError, isLoading } = useNetwork();
   const { data: warehouses = [] } = useWarehouses();
 
   const [destination, setDestination] = useState<Pin | null>(null);
-  const [quantity, setQuantity] = useState(500);
-  const [deadline, setDeadline] = useState(8);
-  const [showHazard, setShowHazard] = useState(false);
+  const [quantity, setQuantity] = useState(1000);
+  const [deadline, setDeadline] = useState(6);
+  const [layers, setLayers] = useState({ roads: true, hazard: true, storages: true });
   const [selected, setSelected] = useState<Plan | null>(null);
-  const [submittedDeadline, setSubmittedDeadline] = useState(deadline);
+  const [submitted, setSubmitted] = useState({ deadline: 6, name: "" });
 
   const run = useMutation({
     mutationFn: optimizeRoute,
@@ -35,17 +38,25 @@ function PlanPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [destination?.lat, destination?.lng]);
 
-  const valid = destination && quantity > 0 && deadline > 0;
+  const totals = useMemo(
+    () => ({
+      stock: warehouses.reduce((s, w) => s + w.units_in_stock, 0),
+      vehicles: warehouses.reduce((s, w) => s + w.vehicles_available, 0),
+    }),
+    [warehouses],
+  );
 
   return (
     <div className="flex h-full flex-col md:flex-row">
-      <aside className="order-2 w-full shrink-0 overflow-y-auto border-t border-border bg-card md:order-1 md:w-[380px] md:border-r md:border-t-0">
+      <aside className="order-2 w-full shrink-0 overflow-y-auto bg-panel px-5 py-5 text-panel-foreground md:order-1 md:w-[360px]">
+        <h2 className="mb-4 text-[15px] font-semibold tracking-tight">New Shipment</h2>
+
         <form
-          className="space-y-4 p-4 md:p-5"
+          className="space-y-3"
           onSubmit={(e) => {
             e.preventDefault();
             if (!destination) return;
-            setSubmittedDeadline(deadline);
+            setSubmitted({ deadline, name: destination.name });
             run.mutate({
               destination_lat: destination.lat,
               destination_lng: destination.lng,
@@ -55,72 +66,93 @@ function PlanPage() {
             });
           }}
         >
-          <div>
-            <h1 className="text-base font-semibold">Plan a delivery</h1>
-            <p className="text-sm text-muted-foreground">
-              Where, how many, and by when. We handle warehouses and routing.
-            </p>
-          </div>
+          <DestinationField value={destination} onChange={setDestination} />
 
-          <Field label="Destination">
-            <DestinationField value={destination} onChange={setDestination} />
+          <Field label="Quantity required (units)">
+            <NumberInput value={quantity} onChange={setQuantity} min={1} step={1} />
           </Field>
-
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Quantity (units)">
-              <NumberInput value={quantity} onChange={setQuantity} min={1} step={1} />
-            </Field>
-            <Field label="Deadline (hours)">
-              <NumberInput value={deadline} onChange={setDeadline} min={0.1} step={0.1} />
-            </Field>
-          </div>
+          <Field label="Delivery deadline (hours)">
+            <NumberInput value={deadline} onChange={setDeadline} min={0.1} step={0.1} />
+          </Field>
 
           <button
             type="submit"
-            disabled={!valid || run.isPending}
-            className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-40"
+            disabled={run.isPending || !destination || !(quantity > 0) || !(deadline > 0)}
+            className="flex w-full items-center justify-between rounded-md bg-panel-foreground px-4 py-3 text-[15px] font-medium text-panel transition-opacity hover:opacity-90 disabled:opacity-40"
           >
-            {run.isPending && <Loader2 className="size-4 animate-spin" aria-hidden />}
-            {run.isPending ? "Finding the best route…" : "Find best route"}
+            {run.isPending ? "Computing routes…" : "Find Best Route"}
+            <span aria-hidden>→</span>
           </button>
         </form>
 
-        <div className="space-y-4 px-4 pb-6 md:px-5">
-          {run.error && (
-            <p
-              role="alert"
-              className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
+        {run.error && (
+          <p
+            role="alert"
+            className="mt-4 rounded-md border border-panel-border px-3 py-2 text-[13px] text-hazard"
+          >
+            {run.error.message}
+          </p>
+        )}
+
+        {result && (
+          <ResultPanel
+            result={result}
+            deadline={submitted.deadline}
+            destinationName={submitted.name}
+            warehouses={warehouses}
+            selected={selected}
+            onSelect={setSelected}
+          />
+        )}
+
+        {!result && !isLoading && (
+          <div className="mt-5 space-y-2 rounded-lg border border-panel-border p-4 text-[12px] text-panel-muted">
+            <p className="text-[13px] font-medium text-panel-foreground">Network loaded</p>
+            <p>
+              {warehouses.length} storage nodes · {network?.features.length.toLocaleString() ?? 0}{" "}
+              road segments
+            </p>
+            <p>
+              {formatInt(totals.stock)} units in stock · {totals.vehicles} vehicles
+            </p>
+            {warehouses.length === 0 && <p>No warehouses yet — see the Inventory page.</p>}
+          </div>
+        )}
+
+        <div className="mt-5 rounded-lg border border-panel-border p-4">
+          <h4 className="mb-2 text-[13px] font-semibold">Map Layers</h4>
+          {(
+            [
+              ["roads", "Road network"],
+              ["hazard", "Hazard exposure"],
+              ["storages", "Storage nodes"],
+            ] as const
+          ).map(([key, label]) => (
+            <label
+              key={key}
+              className="flex cursor-pointer items-center gap-2 py-1 text-[13px] text-panel-muted"
             >
-              {run.error.message}
-            </p>
-          )}
-          {result && (
-            <ResultPanel
-              result={result}
-              deadline={submittedDeadline}
-              warehouses={warehouses}
-              selected={selected}
-              onSelect={setSelected}
-            />
-          )}
-          {!result && !run.isPending && !run.error && warehouses.length === 0 && (
-            <p className="rounded-lg bg-muted p-3 text-sm text-muted-foreground">
-              No warehouses are registered yet. Add your inventory (see the Inventory page) to get
-              route recommendations.
-            </p>
-          )}
+              <input
+                type="checkbox"
+                checked={layers[key]}
+                onChange={(e) => setLayers((l) => ({ ...l, [key]: e.target.checked }))}
+                className="size-3.5 accent-panel-foreground"
+              />
+              {label}
+            </label>
+          ))}
         </div>
       </aside>
 
       <main className="relative order-1 h-[48vh] min-h-0 flex-1 md:order-2 md:h-auto">
         {networkError ? (
-          <div className="grid size-full place-items-center p-8 text-center text-sm text-muted-foreground">
-            Couldn't load the road network: {networkError.message}
+          <div className="flex h-full items-center justify-center px-8 text-center text-sm text-muted-foreground">
+            Could not load the road network: {networkError.message}
           </div>
         ) : (
           <ClientOnly
             fallback={
-              <div className="grid size-full place-items-center text-sm text-muted-foreground">
+              <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
                 Loading map…
               </div>
             }
@@ -130,10 +162,10 @@ function PlanPage() {
               warehouses={warehouses}
               destination={destination}
               plan={selected}
-              showHazard={showHazard}
+              layers={layers}
               onPickDestination={(lat, lng) =>
                 setDestination({
-                  name: `Pinned location`,
+                  name: "Pinned location",
                   lat: Number(lat.toFixed(5)),
                   lng: Number(lng.toFixed(5)),
                 })
@@ -141,27 +173,6 @@ function PlanPage() {
             />
           </ClientOnly>
         )}
-        {isLoading && (
-          <div className="pointer-events-none absolute left-4 top-4 rounded-md bg-card px-3 py-1.5 text-xs shadow">
-            Loading road network…
-          </div>
-        )}
-        <label className="absolute bottom-4 left-4 z-[500] flex cursor-pointer items-center gap-2 rounded-lg border border-border bg-card/95 px-3 py-2 text-xs shadow-sm backdrop-blur">
-          <input
-            type="checkbox"
-            checked={showHazard}
-            onChange={(e) => setShowHazard(e.target.checked)}
-            className="size-3.5 accent-[var(--primary)]"
-          />
-          Colour roads by hazard
-          {showHazard && (
-            <span className="ml-1 flex items-center gap-1" aria-hidden>
-              {["#4f9d69", "#d9a02b", "#e0702d", "#c7382f"].map((c) => (
-                <span key={c} className="size-2.5 rounded-sm" style={{ background: c }} />
-              ))}
-            </span>
-          )}
-        </label>
       </main>
     </div>
   );
@@ -169,10 +180,10 @@ function PlanPage() {
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="space-y-1.5">
-      <span className="text-xs font-medium text-muted-foreground">{label}</span>
+    <label className="block rounded-md border border-panel-border px-3 pt-2 pb-2.5">
+      <span className="mb-0.5 block text-[11px] text-panel-muted">{label}</span>
       {children}
-    </div>
+    </label>
   );
 }
 
@@ -194,7 +205,8 @@ function NumberInput({
       min={min}
       step={step}
       onChange={(e) => onChange(e.target.valueAsNumber)}
-      className="w-full rounded-lg border border-input bg-card px-3 py-2.5 text-sm tabular-nums outline-none focus:border-ring focus:ring-2 focus:ring-ring/20"
+      required
+      className="w-full bg-transparent text-[15px] text-panel-foreground outline-none"
     />
   );
 }

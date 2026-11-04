@@ -12,53 +12,59 @@ const NAV = [
 export function AppShell({ children }: { children: ReactNode }) {
   const { data: meta, error } = useMeta();
   return (
-    <div className="flex h-dvh flex-col bg-background text-foreground">
-      <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-card px-3 md:gap-6 md:px-6">
-        <Link to="/" className="flex items-center gap-2 font-semibold tracking-tight">
-          <svg viewBox="0 0 32 32" className="size-6 text-primary" aria-hidden>
-            <path d="M2 26 L11 10 L17 20 L21 14 L30 26 Z" fill="currentColor" />
+    <div className="flex h-dvh flex-col overflow-hidden bg-background font-sans text-foreground">
+      <header className="flex shrink-0 items-center gap-6 bg-panel px-5 py-3 text-panel-foreground">
+        <Link to="/" className="flex items-center gap-3">
+          <svg viewBox="0 0 32 32" className="size-8" aria-hidden>
+            <path d="M2 26 L11 10 L17 20 L21 14 L30 26 Z" fill="currentColor" opacity="0.9" />
+            <path d="M11 10 L14 15.5 L11 20 L8 15.5 Z" fill="#1c1c1a" opacity="0.35" />
           </svg>
-          <span className="hidden sm:inline">MargaAI</span>{" "}
-          <span className="hidden font-normal text-muted-foreground sm:inline">Nepal</span>
+          <span className="text-[15px] font-semibold">MargaAI Nepal</span>
         </Link>
-        <nav className="flex gap-1 text-sm" aria-label="Main">
+        <nav className="flex gap-1 text-[13px]" aria-label="Main">
           {NAV.map((n) => (
             <Link
               key={n.to}
               to={n.to}
-              className="whitespace-nowrap rounded-md px-2 py-1.5 text-muted-foreground md:px-3 transition-colors hover:bg-muted hover:text-foreground"
-              activeProps={{
-                className: "bg-accent text-accent-foreground font-medium hover:bg-accent",
-              }}
+              className="rounded-md px-3 py-1.5 text-panel-muted transition-colors hover:text-panel-foreground"
+              activeProps={{ className: "bg-panel-border text-panel-foreground" }}
               activeOptions={{ exact: true }}
             >
               {n.label}
             </Link>
           ))}
         </nav>
-        <div className="ml-auto hidden text-xs text-muted-foreground sm:block">
-          {error ? (
-            <span className="text-destructive">Backend offline</span>
-          ) : meta ? (
-            <span>
-              {meta.network.counts.edges.toLocaleString()} road segments ·{" "}
-              {meta.network.network_km.toLocaleString()} km ·{" "}
-              {meta.weather.available ? "live rainfall" : "no live rainfall"}
-            </span>
-          ) : null}
-        </div>
+        <span className="ml-auto hidden text-[12px] text-panel-muted sm:block">
+          {error
+            ? "Backend offline"
+            : meta
+              ? `${meta.network.counts.edges.toLocaleString()} road segments · ${meta.weather.available ? "live rainfall" : "no live rainfall"}`
+              : ""}
+        </span>
       </header>
+
       {meta?.network.is_fixture && (
         <div
           role="alert"
-          className="flex items-center gap-2 bg-warning/20 px-4 py-1.5 text-xs font-medium"
+          className="flex shrink-0 items-center gap-2 bg-warning px-5 py-1.5 text-[12px] font-medium text-panel"
         >
           <AlertTriangle className="size-3.5 shrink-0" aria-hidden />
-          Development fixture — roads are synthetic, not real. Build the real network (see
-          docs/DATA_SOURCES.md) before use.
+          Development fixture — roads are synthetic, not real. Build the real network
+          (docs/DATA_SOURCES.md) before use.
         </div>
       )}
+
       <div className="min-h-0 flex-1">{children}</div>
+
+      <footer className="flex shrink-0 items-center gap-2 bg-panel px-5 py-2 text-[12px] text-panel-muted">
+        <span aria-hidden>ⓘ</span>
+        <span className="truncate">
+          {meta
+            ? `Roads: ${meta.network.sources.roads} · Elevation: SRTM · Rainfall: ${meta.weather.available ? "Open-Meteo" : "unavailable"}. `
+            : ""}
+          All quantities, times and fuel figures are computed in code before any reasoning step.
+        </span>
+      </footer>
     </div>
   );
 }

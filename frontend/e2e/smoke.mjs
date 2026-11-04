@@ -18,7 +18,7 @@ const ctx = await browser.newContext({
   deviceScaleFactor: 1,
 });
 const page = await ctx.newPage();
-page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
+page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}\n${(e.stack ?? "").split("\n").slice(0, 6).join("\n")}`));
 page.on(
   "console",
   (m) =>
@@ -29,7 +29,7 @@ page.on(
 
 // 1. Load: header, status, map canvas with roads drawn
 await page.goto(BASE, { waitUntil: "networkidle" });
-await page.getByRole("heading", { name: "Plan a delivery" }).waitFor();
+await page.getByRole("heading", { name: "New Shipment" }).waitFor();
 await page.waitForFunction(() => document.querySelectorAll(".leaflet-container canvas").length > 0);
 await shot(page, "01-initial");
 
@@ -48,52 +48,57 @@ await page
   .first()
   .fill("400");
 await page.locator('input[type="number"]').nth(1).fill("12");
-await page.getByRole("button", { name: "Find best route" }).click();
-await page.getByText(/Arrives in/).waitFor({ timeout: 30000 });
-await page.getByText("Why this plan").waitFor();
+await page.getByRole("button", { name: /Find Best Route/ }).click();
+await page.getByText("Top Recommendation").waitFor({ timeout: 30000 });
+await page.getByRole("button", { name: /Why this plan/ }).click();
+await page.getByRole("heading", { name: "Why this plan?" }).waitFor();
 const text = await page.locator("aside").innerText();
 assert.match(text, /Distance/);
-assert.match(text, /Fuel \(est\.\)/);
-assert.match(text, /Rule-based|Gemma/);
+assert.match(text, /Fuel est\./);
+assert.match(await page.getByRole("dialog").innerText(), /rule-based|Gemma/i);
 await page.waitForSelector('svg[aria-label="Elevation profile of the route"]');
+await shot(page, "02b-explanation");
+await page.keyboard.press("Escape");
+await page.getByRole("dialog").waitFor({ state: "hidden" });
+await page.waitForTimeout(400);
 await shot(page, "02-result");
 
 // 4. Hazard overlay toggles without error
-await page.getByLabel("Colour roads by hazard").check();
+await page.getByLabel("Hazard exposure").uncheck();
+await page.getByLabel("Hazard exposure").check();
+await page.getByLabel("Road network").uncheck();
+await page.getByLabel("Road network").check();
 await shot(page, "03-hazard");
 
 // 5a. Infeasible by deadline: honest reason + suggested deadline
 await page.locator('input[type="number"]').nth(1).fill("0.1");
 await page.locator('input[type="number"]').first().fill("400");
-await page.getByRole("button", { name: "Find best route" }).click();
-await page.getByText("Can't be delivered as requested").waitFor({ timeout: 30000 });
+await page.getByRole("button", { name: /Find Best Route/ }).click();
+await page.getByText("Cannot be fulfilled").waitFor({ timeout: 30000 });
 assert.match(await page.locator("aside").innerText(), /try a deadline of at least/);
 await shot(page, "04-infeasible-deadline");
 
 // 5b. Infeasible by stock: more than the whole network holds
 await page.locator('input[type="number"]').first().fill("99999");
 await page.locator('input[type="number"]').nth(1).fill("24");
-await page.getByRole("button", { name: "Find best route" }).click();
+await page.getByRole("button", { name: /Find Best Route/ }).click();
 await page.getByText(/enough stock and vehicles/).waitFor({ timeout: 30000 });
 
 // 5c. Clearing the destination clears the stale answer; map click pins a new one
 await page.getByRole("button", { name: "Clear destination" }).click();
-await page.getByText("Can't be delivered as requested").waitFor({ state: "hidden", timeout: 5000 });
+await page.getByText("Cannot be fulfilled").waitFor({ state: "hidden", timeout: 5000 });
 await page.locator(".leaflet-container").click({ position: { x: 600, y: 300 } });
 await page.getByText("Pinned location").waitFor();
 await page.locator('input[type="number"]').first().fill("300");
-await page.getByRole("button", { name: "Find best route" }).click();
+await page.getByRole("button", { name: /Find Best Route/ }).click();
 await page
-  .getByText(/Arrives in|Can't be delivered/)
+  .getByText(/Top Recommendation|Cannot be fulfilled/)
   .first()
   .waitFor({ timeout: 30000 });
 
 // 5d. Alternatives expander (when present) selects a plan
-const alt = page.getByRole("button", { name: /Other feasible plans/ });
-if (await alt.count()) {
-  await alt.click();
-  await page.locator("section[aria-label='Alternative plans'] li button").first().click();
-}
+const alt = page.locator("[aria-label='Alternative plans'] li button");
+if (await alt.count()) await alt.last().click();
 
 // 5e. Unknown API routes / admin writes are blocked at the public edge
 for (const [method, path] of [
@@ -129,7 +134,7 @@ await page.getByRole("heading", { name: "Inventory" }).waitFor();
 const m = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 });
 const mp = await m.newPage();
 await mp.goto(BASE, { waitUntil: "networkidle" });
-await mp.getByRole("heading", { name: "Plan a delivery" }).waitFor();
+await mp.getByRole("heading", { name: "New Shipment" }).waitFor();
 assert.equal(
   await mp.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
   true,

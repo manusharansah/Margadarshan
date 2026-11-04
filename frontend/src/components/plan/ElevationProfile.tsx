@@ -46,11 +46,11 @@ export function ElevationProfile({ plan }: { plan: Plan }) {
       >
         <path
           d={`${line} L${x(sample.at(-1)![0])},${H - pad} L${x(0)},${H - pad} Z`}
-          className="fill-primary/10"
+          className="fill-foreground/10"
         />
         <path
           d={line}
-          className="stroke-primary"
+          className="stroke-foreground"
           fill="none"
           strokeWidth={1.5}
           strokeLinejoin="round"
