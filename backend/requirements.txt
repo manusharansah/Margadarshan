@@ -10,3 +10,4 @@ SQLAlchemy==2.1.8
 psycopg[binary]==3.3.8
 python-multipart==0.0.33
 boto3==1.43.123
+joserfc==1.8.0

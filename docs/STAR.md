@@ -31,7 +31,7 @@ Action. I added the deadline filter in code, scaled hazard by length and rain, a
 consumption plus climb energy, depending on direction. The ingestion step now inserts virtual nodes into long straight
 segments, and the drivable check validates the road class itself.
 
-Result. The 114 backend tests include oracles. Yen's paths match brute-force enumeration, Held-Karp matches every
+Result. The backend tests include oracles. Yen's paths match brute-force enumeration, Held-Karp matches every
 permutation, and plan totals follow the arithmetic. The tests caught two real defects: footpaths slipping through saved
 data, and sparse roads staying as multi-kilometre edges.
 
@@ -101,3 +101,55 @@ CloudFormation stack, and cleaned the repository.
 
 Result. The template passes `cfn-lint`. The Docker images and the AWS deployment have not been run, because this
 environment has no Docker daemon and no AWS access.
+
+## 8. Replace guessed model parameters with evidence
+
+Situation. Speeds, fuel, rainfall effect and untagged road surfaces came from numbers I picked. Roads were treated as
+two-way and symmetric, so a climb cost the same as a descent.
+
+Task. Use published findings and the real data where they exist, test the results, and say plainly where nothing
+supports a number.
+
+Action. I replaced the rainfall scale with the Nepal Himalaya landslide threshold of Dahal and Hasegawa, built a
+power-balance truck model with a curve limit from road geometry and an energy-balance fuel model, and made the graph
+directed so one-way roads and uphill or downhill direction count. I tested whether a learned surface prior beats my
+defaults on held-out roads, and added a Monte Carlo ETA range. Searches found no Nepal-specific truck fuel, loading time
+or live closure data, and the landslide catalogues were unreachable, so those stay assumptions and are listed.
+
+Result. The learned surface prior predicts held-out surfaces at 83.6% against 72.8% for my defaults. The Dolalghat to
+Dhulikhel climb now costs 13.9 L against 6.0 L for the descent. A 60 tonne flat-road run lands below a published
+71 to 91 L per 100 km, as it should without hills. [MODEL.md](MODEL.md) records each basis. Nothing is validated against
+Nepali field data.
+
+## 9. First live Gemma run
+
+Situation. All AI behaviour had only been tested with stand-ins.
+
+Task. Run the real model and fix what it exposes.
+
+Action. I ran intake, plan choice and proposals against the real API on the real network. It exposed four problems that
+no stand-in could have: the model wrote a wrong figure ("0 vehicles" for nine), calls took 5 to 90 seconds, some calls
+returned 503 or an empty `RECITATION` response, and my tests had silently picked up the real key. I made the model write
+placeholders that code fills, rejected any text with its own digits and retried once with the reason, split the
+answer into an instant computed part and a later AI part, added retries with clear errors, and made tests ignore ambient
+credentials. I also found that fuel was counted for one truck instead of every vehicle and fixed it.
+
+Result. Real explanations now contain only code-written figures. The plan appears in under a second and the AI text
+follows. The old failure mode, a slow or failing model blocking the answer, is gone.
+
+## 10. Users, organisations and safe data handling
+
+Situation. Anyone who could open the site could use it, and inventory was one shared table behind a single admin key.
+
+Task. Make it a business product: sign-in, separate customers, roles, and careful handling of personal data.
+
+Action. I added OpenID Connect sign-in with PKCE, state, nonce and strict token checks, server-side sessions stored as
+hashes in a hardened cookie, organisations with four roles, invitations, an audit log, order history with retention,
+per-person data export and deletion, CSRF defence, rate limits and security headers. I wrote tests that attack each
+protection, including forged tokens and cross-organisation access, then broke three protections on purpose to
+confirm the tests fail. Writing the tests found that the bootstrap-owner rule would have let one email create a second
+organisation, which I fixed.
+
+Result. 263 backend tests. The browser test signs in through the real flow as an owner and a member and checks every page,
+the admin tools, role limits, sign-out and the phone layout. Real Google or Cognito sign-in, a penetration test and a
+privacy-law review remain to do, and [SECURITY.md](SECURITY.md) lists the known gaps.

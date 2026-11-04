@@ -5,6 +5,7 @@ import requests
 
 from gis_backend.gemma_reasoner import DeterministicReasoner, LiveGemmaReasoner, compact
 from gis_backend.models import CandidatePlan, DeliveryRequest, RouteLeg, StorageNode
+from gis_backend.db import Organization, make_session_factory
 from gis_backend.store import WarehouseStore, validate
 from gis_backend.weather import WeatherService
 
@@ -20,16 +21,23 @@ NAME = lambda s: {"A": "Alpha", "B": "Bravo"}.get(s, s)  # noqa: E731
 
 
 # ------------------------------------------------------------------ store
+def make_store(tmp_path, org="org-1"):
+    sf, _ = make_session_factory(f"sqlite:///{tmp_path}/t.db")
+    with sf() as s, s.begin():
+        s.add(Organization(id=org, name="Test"))
+    return WarehouseStore(sf), org
+
+
 def test_store_crud_and_csv(tmp_path):
-    st = WarehouseStore(f"sqlite:///{tmp_path}/t.db")
-    assert st.list() == []
-    n = st.import_csv("id,name,lat,lng,units_in_stock,vehicles_available,vehicle_capacity\nW1,Banepa,27.63,85.52,500,3,\nW2,Panauti,27.58,85.52,0,0,150\n")
+    st, org = make_store(tmp_path)
+    assert st.list(org) == []
+    n = st.import_csv(org, "id,name,lat,lng,units_in_stock,vehicles_available,vehicle_capacity\nW1,Banepa,27.63,85.52,500,3,\nW2,Panauti,27.58,85.52,0,0,150\n")
     assert n == 2
-    w1, w2 = st.get("W1"), st.get("W2")
+    w1, w2 = st.get(org, "W1"), st.get(org, "W2")
     assert (w1.units_in_stock, w1.vehicle_capacity) == (500, 200) and w2.vehicle_capacity == 150
-    st.upsert(StorageNode("W1", "Banepa", 27.63, 85.52, 450, 3))
-    assert st.get("W1").units_in_stock == 450 and len(st.list()) == 2
-    assert st.delete("W1") and not st.delete("W1")
+    st.upsert(org, StorageNode("W1", "Banepa", 27.63, 85.52, 450, 3))
+    assert st.get(org, "W1").units_in_stock == 450 and len(st.list(org)) == 2
+    assert st.delete(org, "W1") and not st.delete(org, "W1")
 
 
 @pytest.mark.parametrize("csv_text, msg", [
@@ -38,10 +46,10 @@ def test_store_crud_and_csv(tmp_path):
     ("id,name,lat,lng,units_in_stock,vehicles_available\nW,n,27,85,-5,1\n", "line 2"),
 ])
 def test_csv_import_is_all_or_nothing(tmp_path, csv_text, msg):
-    st = WarehouseStore(f"sqlite:///{tmp_path}/t.db")
+    st, org = make_store(tmp_path)
     with pytest.raises(ValueError, match=msg):
-        st.import_csv(csv_text)
-    assert st.list() == []
+        st.import_csv(org, csv_text)
+    assert st.list(org) == []
 
 
 def test_validate_bounds():
@@ -171,9 +179,9 @@ def test_weather_failure_is_reported_not_invented():
 def test_shipped_example_inventories_are_valid_and_inside_study_area(tmp_path, fname, prefix, count):
     from pathlib import Path
     sample = Path(__file__).resolve().parents[1] / "examples" / fname
-    st = WarehouseStore(f"sqlite:///{tmp_path}/s.db")
-    assert st.import_csv(sample.read_text()) == count
-    ws = st.list()
+    st, org = make_store(tmp_path)
+    assert st.import_csv(org, sample.read_text()) == count
+    ws = st.list(org)
     assert len({w.node_id for w in ws}) == count and all(w.node_id.startswith(prefix) for w in ws)
     assert all(27.45 <= w.lat <= 27.80 and 85.25 <= w.lng <= 85.80 for w in ws)  # default ingest bbox
     assert any(w.vehicles_available == 0 for w in ws)  # exercises the stock-but-no-vehicle case

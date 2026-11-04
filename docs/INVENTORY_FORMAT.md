@@ -18,12 +18,14 @@ Two example files ship in `backend/examples/`. Both are invented, so replace the
 
 An import is all or nothing. One bad row rejects the file and names the line.
 
+Admins can add, edit and delete warehouses and upload a CSV on the Inventory page. Other options:
+
 ```bash
-python -m gis_backend.seed_warehouses my_inventory.csv
-curl -H "X-API-Key: $KEY" -F file=@my_inventory.csv $API/warehouses/import
-curl -H "X-API-Key: $KEY" -X PUT $API/warehouses/ID -H 'content-type: application/json' \
-     -d '{"name":"Depot","lat":27.6,"lng":85.5,"units_in_stock":500,"vehicles_available":2}'
+python -m gis_backend.seed_warehouses my_inventory.csv --org "Acme Ltd"       # organisation must exist already
+curl -b cookies.txt -H 'X-Requested-With: marga' -F file=@my_inventory.csv $APP/api/warehouses/import
 ```
 
+An organisation exists once its first owner has signed in. Each organisation sees only its own warehouses.
+
 Keep stock current. Re-import after each dispatch, or feed the file from your stock system. Recommendations are only as
-good as this data. The product has no multi-tenant accounts, so run one deployment per operator.
+good as this data.

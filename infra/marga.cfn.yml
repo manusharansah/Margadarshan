@@ -1,20 +1,25 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   MargaAI Nepal - ECS Fargate (frontend + API in one task), RDS PostgreSQL for warehouse
-  inventory, S3 bucket for the prebuilt road-network artifact, public ALB.
+  inventory, S3 bucket for the prebuilt road-network artifact, HTTPS-only public ALB, OpenID Connect sign-in.
 
 Parameters:
   VpcId: { Type: AWS::EC2::VPC::Id }
   PublicSubnetIds: { Type: List<AWS::EC2::Subnet::Id>, Description: At least two subnets in different AZs with internet access }
   FrontendImage: { Type: String, Description: "ECR image URI for the frontend, e.g. 123.dkr.ecr.ap-south-1.amazonaws.com/marga-frontend:sha" }
   BackendImage: { Type: String, Description: ECR image URI for the API }
-  CertificateArn: { Type: String, Default: "", Description: Optional ACM certificate ARN; enables HTTPS and redirects HTTP }
+  CertificateArn: { Type: String, AllowedPattern: "arn:aws:acm:.+", Description: ACM certificate for the public hostname. HTTPS is required because session cookies are Secure. }
+  PublicUrl: { Type: String, AllowedPattern: "https://[^/]+", Description: "Public https origin users open, e.g. https://marga.example.com (no trailing slash). Register PublicUrl/api/auth/callback as the redirect URI at your identity provider." }
+  OidcIssuer: { Type: String, Default: "https://accounts.google.com", Description: "OpenID Connect issuer URL, for example Google, Cognito, Entra or Auth0" }
+  OidcClientId: { Type: String, MinLength: 1 }
+  OidcClientSecret: { Type: String, NoEcho: true, MinLength: 1 }
+  BootstrapOwnerEmail: { Type: String, AllowedPattern: "[^@\\s]+@[^@\\s]+", Description: "The first person to sign in with this email becomes owner of the first organisation. Everyone else needs an invitation." }
+  AllowedEmailDomains: { Type: String, Default: "", Description: Optional comma-separated list; only these email domains may sign in }
   GemmaApiKey: { Type: String, Default: "", NoEcho: true, Description: Optional Google AI Studio key; empty = rule-based explanations }
   DesiredCount: { Type: Number, Default: 1, MinValue: 1 }
   DbInstanceClass: { Type: String, Default: db.t4g.micro }
 
 Conditions:
-  HasCert: !Not [!Equals [!Ref CertificateArn, ""]]
   HasGemma: !Not [!Equals [!Ref GemmaApiKey, ""]]
 
 Resources:
@@ -27,11 +32,11 @@ Resources:
       PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true }
       VersioningConfiguration: { Status: Enabled }
 
-  AdminKeySecret:
+  OidcSecret:
     Type: AWS::SecretsManager::Secret
     Properties:
-      Description: X-API-Key for warehouse write endpoints
-      GenerateSecretString: { PasswordLength: 40, ExcludePunctuation: true }
+      Description: OpenID Connect client secret
+      SecretString: !Ref OidcClientSecret
 
   GemmaSecret:
     Type: AWS::SecretsManager::Secret
@@ -117,7 +122,7 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: secretsmanager:GetSecretValue
-                Resource: [!Ref AdminKeySecret, !Ref DbSecret, !If [HasGemma, !Ref GemmaSecret, !Ref "AWS::NoValue"]]
+                Resource: [!Ref OidcSecret, !Ref DbSecret, !If [HasGemma, !Ref GemmaSecret, !Ref "AWS::NoValue"]]
 
   TaskRole:
     Type: AWS::IAM::Role
@@ -148,11 +153,18 @@ Resources:
           PortMappings: [{ ContainerPort: 8000 }]
           Environment:
             - { Name: MARGA_NETWORK_S3_URI, Value: !Sub "s3://${DataBucket}/network.json.gz" }
+            - { Name: OIDC_ISSUER, Value: !Ref OidcIssuer }
+            - { Name: OIDC_CLIENT_ID, Value: !Ref OidcClientId }
+            - { Name: MARGA_PUBLIC_URL, Value: !Ref PublicUrl }
+            - { Name: MARGA_COOKIE_SECURE, Value: "true" }
+            - { Name: MARGA_TRUST_PROXY, Value: "true" }
+            - { Name: MARGA_BOOTSTRAP_OWNER_EMAIL, Value: !Ref BootstrapOwnerEmail }
+            - { Name: MARGA_ALLOWED_EMAIL_DOMAINS, Value: !Ref AllowedEmailDomains }
             - { Name: DB_HOST, Value: !GetAtt Db.Endpoint.Address }
-            - { Name: CORS_ORIGINS, Value: "" }
+            - { Name: CORS_ORIGINS, Value: !Ref PublicUrl }
             - !If [HasGemma, { Name: MARGA_REQUIRE_GEMMA, Value: "true" }, !Ref "AWS::NoValue"]
           Secrets:
-            - { Name: MARGA_ADMIN_API_KEY, ValueFrom: !Ref AdminKeySecret }
+            - { Name: OIDC_CLIENT_SECRET, ValueFrom: !Ref OidcSecret }
             - { Name: DB_PASSWORD, ValueFrom: !Sub "${DbSecret}:password::" }
             - { Name: DB_USER, ValueFrom: !Sub "${DbSecret}:username::" }
             - !If [HasGemma, { Name: GEMMA_API_KEY, ValueFrom: !Ref GemmaSecret }, !Ref "AWS::NoValue"]
@@ -193,25 +205,21 @@ Resources:
       LoadBalancerArn: !Ref Alb
       Port: 80
       Protocol: HTTP
-      DefaultActions:
-        - !If
-          - HasCert
-          - { Type: redirect, RedirectConfig: { Protocol: HTTPS, Port: "443", StatusCode: HTTP_301 } }
-          - { Type: forward, TargetGroupArn: !Ref TargetGroup }
+      DefaultActions: [{ Type: redirect, RedirectConfig: { Protocol: HTTPS, Port: "443", StatusCode: HTTP_301 } }]
 
   HttpsListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
-    Condition: HasCert
     Properties:
       LoadBalancerArn: !Ref Alb
       Port: 443
       Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
       Certificates: [{ CertificateArn: !Ref CertificateArn }]
       DefaultActions: [{ Type: forward, TargetGroupArn: !Ref TargetGroup }]
 
   Service:
     Type: AWS::ECS::Service
-    DependsOn: [HttpListener]
+    DependsOn: [HttpsListener]
     Properties:
       Cluster: !Ref Cluster
       LaunchType: FARGATE
@@ -224,8 +232,8 @@ Resources:
       LoadBalancers: [{ ContainerName: frontend, ContainerPort: 3000, TargetGroupArn: !Ref TargetGroup }]
 
 Outputs:
-  Url: { Value: !Sub "http://${Alb.DNSName}" }
+  AlbDnsName: { Value: !GetAtt Alb.DNSName, Description: Point your DNS name (PublicUrl) at this load balancer }
+  OidcRedirectUri: { Value: !Sub "${PublicUrl}/api/auth/callback", Description: Register this redirect URI at your identity provider }
   DataBucketName: { Value: !Ref DataBucket, Description: Upload network.json.gz here }
-  AdminKeySecretArn: { Value: !Ref AdminKeySecret }
   ClusterName: { Value: !Ref Cluster }
   ServiceName: { Value: !GetAtt Service.Name }

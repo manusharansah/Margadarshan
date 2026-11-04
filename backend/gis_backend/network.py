@@ -51,7 +51,7 @@ class Network:
         self._lock = threading.RLock()
         self.rain_index_at: Callable[[float, float], float] = lambda lat, lng: 0.0
         self.truck = tm.DEFAULT_TRUCK
-        self.closures: List[dict] = []   # {"lat","lng","radius_m"}; arcs within radius are removed
+        self._closure_views: Dict[tuple, object] = {}
         self.arrays = compute_arrays(self.edges, self.truck)
         self._mid = [e.geometry[len(e.geometry) // 2] for e in self.edges]
         self.graph = nx.DiGraph()
@@ -78,13 +78,27 @@ class Network:
             return cls(json.load(fh))
 
     # -------------------------------------------------------------- graph
-    def _closed(self, lat: float, lng: float) -> bool:
-        k = math.cos(math.radians(lat))
-        return any(math.hypot((lat - c["lat"]) * 111_320, (lng - c["lng"]) * 111_320 * k) <= c["radius_m"]
-                   for c in self.closures)
+    def graph_for(self, closures: List[dict]):
+        """The routable graph with one organisation's closures removed, as a read-only view. The shared graph is never
+        modified, so one tenant's closures cannot affect another's routes."""
+        if not closures:
+            return self.graph
+        key = (id(self.graph), tuple(sorted((round(c["lat"], 5), round(c["lng"], 5), round(c["radius_m"])) for c in closures)))
+        view = self._closure_views.get(key)
+        if view is None:
+            closed = set()
+            for e, mid in zip(self.edges, self._mid):
+                k = math.cos(math.radians(mid[0]))
+                if any(math.hypot((mid[0] - c["lat"]) * 111_320, (mid[1] - c["lng"]) * 111_320 * k) <= c["radius_m"] for c in closures):
+                    closed.update(((e.node_a, e.node_b), (e.node_b, e.node_a)))
+            view = nx.subgraph_view(self.graph, filter_edge=lambda u, v, _c=frozenset(closed): (u, v) not in _c)
+            if len(self._closure_views) > 32:
+                self._closure_views.clear()
+            self._closure_views[key] = view
+        return view
 
     def rebuild_graph(self) -> None:
-        """(Re)compute arc weights from static attributes, current rainfall and operator closures."""
+        """(Re)compute arc weights from static attributes and current rainfall."""
         with self._lock:
             keep = getattr(self, "_keep", None)
             rain = np.array([self.rain_index_at(m[0], m[1]) for m in self._mid])
@@ -96,8 +110,6 @@ class Network:
                     g.add_node(nid, lat=n.lat, lng=n.lng, elev=n.elevation_m)
             for i, e in enumerate(self.edges):
                 if keep is not None and (e.node_a not in keep or e.node_b not in keep):
-                    continue
-                if self.closures and self._closed(*self._mid[i]):
                     continue
                 for fwd in (True, False):
                     if (fwd and e.oneway == -1) or (not fwd and e.oneway == 1):
@@ -117,10 +129,6 @@ class Network:
 
     def apply_rain(self, rain_index_at: Callable[[float, float], float]) -> None:
         self.rain_index_at = rain_index_at
-        self.rebuild_graph()
-
-    def set_closures(self, closures: List[dict]) -> None:
-        self.closures = list(closures)
         self.rebuild_graph()
 
     # ------------------------------------------------------------ snapping

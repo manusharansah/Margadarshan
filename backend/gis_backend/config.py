@@ -20,11 +20,29 @@ class Settings:
     cors_origins: List[str] = field(
         default_factory=lambda: [o.strip() for o in os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()]
     )
-    admin_api_key: str = field(default_factory=lambda: os.environ.get("MARGA_ADMIN_API_KEY", ""))
     weather_enabled: bool = field(default_factory=lambda: _bool("MARGA_WEATHER_ENABLED", True))
     weather_ttl_seconds: int = field(default_factory=lambda: int(os.environ.get("MARGA_WEATHER_TTL", "1800")))
     require_gemma: bool = field(default_factory=lambda: _bool("MARGA_REQUIRE_GEMMA", False))
+    # --- sign-in (OpenID Connect) -------------------------------------------------------------
+    oidc_issuer: str = field(default_factory=lambda: os.environ.get("OIDC_ISSUER", "https://accounts.google.com"))
+    oidc_client_id: str = field(default_factory=lambda: os.environ.get("OIDC_CLIENT_ID", ""))
+    oidc_client_secret: str = field(default_factory=lambda: os.environ.get("OIDC_CLIENT_SECRET", ""))
+    public_url: str = field(default_factory=lambda: os.environ.get("MARGA_PUBLIC_URL", "http://localhost:3000").rstrip("/"))
+    cookie_secure: bool = field(default_factory=lambda: _bool("MARGA_COOKIE_SECURE", True))
+    session_idle_minutes: int = field(default_factory=lambda: int(os.environ.get("MARGA_SESSION_IDLE_MINUTES", "120")))
+    session_max_hours: int = field(default_factory=lambda: int(os.environ.get("MARGA_SESSION_MAX_HOURS", "12")))
+    bootstrap_owner_email: str = field(default_factory=lambda: os.environ.get("MARGA_BOOTSTRAP_OWNER_EMAIL", "").strip().lower())
+    allow_self_signup: bool = field(default_factory=lambda: _bool("MARGA_ALLOW_SELF_SIGNUP", False))
+    allowed_email_domains: List[str] = field(
+        default_factory=lambda: [d.strip().lower() for d in os.environ.get("MARGA_ALLOWED_EMAIL_DOMAINS", "").split(",") if d.strip()])
+    order_retention_days: int = field(default_factory=lambda: int(os.environ.get("MARGA_ORDER_RETENTION_DAYS", "365")))
+    audit_retention_days: int = field(default_factory=lambda: int(os.environ.get("MARGA_AUDIT_RETENTION_DAYS", "730")))
+    trust_proxy: bool = field(default_factory=lambda: _bool("MARGA_TRUST_PROXY", False))
     loading_hours_per_stop: float = field(default_factory=lambda: float(os.environ.get("MARGA_LOADING_HOURS", "0")))
+
+    @property
+    def oidc_redirect_uri(self) -> str:
+        return f"{self.public_url}/api/auth/callback"
 
     @property
     def network_path(self) -> Path:

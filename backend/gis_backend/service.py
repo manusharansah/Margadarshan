@@ -68,11 +68,12 @@ def _rank(plans: List[CandidatePlan]) -> List[CandidatePlan]:
 
 def verify_remedy(network: Network, usable: Dict[str, StorageNode], dest_node: int, req: DeliveryRequest,
                   nm: Callable[[str], str], source: str, kind: str, rationale: str,
-                  cache: Optional[dict] = None) -> Optional[dict]:
+                  cache: Optional[dict] = None, graph=None, loading: float = 0.0) -> Optional[dict]:
     """Run the real planner on an alternative order; return it only if it is genuinely feasible."""
     if req.quantity <= 0 or not (0 < req.deadline_hours <= 720):
         return None
-    best = _rank(generate_plans(PlanContext(network.graph, usable, dest_node, req, sssp_cache=cache)))
+    best = _rank(generate_plans(PlanContext(graph if graph is not None else network.graph, usable, dest_node, req,
+                                            loading, sssp_cache=cache)))
     if not best:
         return None
     p = best[0]
@@ -82,7 +83,8 @@ def verify_remedy(network: Network, usable: Dict[str, StorageNode], dest_node: i
             "verified": True}
 
 
-def computed_remedies(network, usable, dest_node, request, plans, nm, cache: Optional[dict] = None) -> List[dict]:
+def computed_remedies(network, usable, dest_node, request, plans, nm, cache: Optional[dict] = None, graph=None,
+                      loading: float = 0.0) -> List[dict]:
     """Code-derived options (no AI): a longer deadline, or a smaller quantity that fits the deadline.
 
     The quantity comes from bisection. Whether an order is deliverable is not strictly monotone in its
@@ -92,7 +94,7 @@ def computed_remedies(network, usable, dest_node, request, plans, nm, cache: Opt
     if plans:
         h = min(720.0, math.ceil(min(p.total_time_hours for p in plans) * 2) / 2)
         r = verify_remedy(network, usable, dest_node, replace(request, deadline_hours=h), nm, "computed",
-                          "extend_deadline", f"Same {request.quantity} units, deadline moved to {h:g} h.", cache)
+                          "extend_deadline", f"Same {request.quantity} units, deadline moved to {h:g} h.", cache, graph, loading)
         if r:
             out.append(r)
     lo, hi, best_q = 0, min(request.quantity - 1, sum(w.units_in_stock for w in usable.values())), 0
@@ -101,22 +103,22 @@ def computed_remedies(network, usable, dest_node, request, plans, nm, cache: Opt
         if hi <= lo or time.monotonic() - started > REMEDY_BUDGET_SECONDS:
             break
         mid = (lo + hi + 1) // 2
-        if _rank(generate_plans(PlanContext(network.graph, usable, dest_node, replace(request, quantity=mid),
-                                            sssp_cache=cache))):
+        if _rank(generate_plans(PlanContext(graph if graph is not None else network.graph, usable, dest_node,
+                                            replace(request, quantity=mid), loading, sssp_cache=cache))):
             lo = best_q = mid
         else:
             hi = mid - 1
     if best_q > 0:
         r = verify_remedy(network, usable, dest_node, replace(request, quantity=best_q), nm, "computed",
                           "reduce_quantity",
-                          f"Ship {best_q} units now within {request.deadline_hours:g} h; {request.quantity - best_q} remain.", cache)
+                          f"Ship {best_q} units now within {request.deadline_hours:g} h; {request.quantity - best_q} remain.", cache, graph, loading)
         if r:
             out.append(r)
     return out
 
 
 def gemma_remedies(client: GemmaClient, network, usable, dest_node, request, plans, anchors, nm,
-                   cache: Optional[dict] = None) -> List[dict]:
+                   cache: Optional[dict] = None, graph=None, loading: float = 0.0) -> List[dict]:
     """Gemma proposes business-sensible alternatives; each is accepted only if the planner proves it feasible."""
     facts = {
         "order": {"quantity": request.quantity, "deadline_hours": request.deadline_hours,
@@ -147,7 +149,7 @@ def gemma_remedies(client: GemmaClient, network, usable, dest_node, request, pla
         if not (0 < q <= request.quantity) or (q, round(h, 2)) in seen or re.search(r"\d", why) or not why:
             continue   # a rationale with a self-typed number is unverifiable, so the proposal is dropped
         r = verify_remedy(network, usable, dest_node, replace(request, quantity=q, deadline_hours=h), nm, "gemma",
-                          "split_or_adjust", why, cache)
+                          "split_or_adjust", why, cache, graph, loading)
         if r:
             seen.add((q, r["deadline_hours"]))
             out.append(r)
@@ -164,7 +166,8 @@ def _with_reliability(d: dict, network: Network, plan: CandidatePlan, request: D
 
 def process_request(network: Network, warehouses: List[StorageNode], request: DeliveryRequest,
                     reasoner: Optional[Reasoner] = None, weather: Optional[dict] = None,
-                    client: Optional[GemmaClient] = None, defer_ai: bool = False) -> dict:
+                    client: Optional[GemmaClient] = None, defer_ai: bool = False, graph=None,
+                    loading_hours: float = 0.0) -> dict:
     """``defer_ai=True`` returns the computed answer at once (rule-based text, computed remedies) with
     ``ai.status == "pending"`` and a private ``_ctx``; ``enrich_with_ai`` then adds the model's contribution.
     Model calls take 15 to 60 s on the free tier, so the dealer's answer never waits for them."""
@@ -186,7 +189,7 @@ def process_request(network: Network, warehouses: List[StorageNode], request: De
     names = {w.node_id: w.name for w in warehouses}
     nm = lambda wid: "+".join(names.get(p, p) for p in wid.split("+"))  # noqa: E731
 
-    ctx = PlanContext(network.graph, usable, dest_node, request)
+    ctx = PlanContext(graph if graph is not None else network.graph, usable, dest_node, request, loading_hours)
     plans = generate_plans(ctx) if usable else []
     feasible = sorted((p for p in plans if p.meets_deadline), key=policy_key)
 
@@ -207,10 +210,11 @@ def process_request(network: Network, warehouses: List[StorageNode], request: De
     remedy_error: Optional[str] = None
     if not chosen and usable:
         cache: dict = ctx._sssp  # shortest-path trees already computed for this request
-        remedies = computed_remedies(network, usable, dest_node, request, plans, nm, cache)
+        remedies = computed_remedies(network, usable, dest_node, request, plans, nm, cache, ctx.G, loading_hours)
         if client is not None and not deferred:
             try:
-                remedies += gemma_remedies(client, network, usable, dest_node, request, plans, remedies, nm, cache)
+                remedies += gemma_remedies(client, network, usable, dest_node, request, plans, remedies, nm, cache, ctx.G,
+                                           loading_hours)
             except Exception as exc:  # noqa: BLE001 - AI proposals are a bonus; computed options still stand
                 remedy_error = str(exc)
 
@@ -238,7 +242,8 @@ def process_request(network: Network, warehouses: List[StorageNode], request: De
     if deferred:
         out["ai"] = {"status": "pending"}
         out["_ctx"] = {"network": network, "usable": usable, "dest_node": dest_node, "request": request, "plans": plans,
-                       "feasible": feasible, "nm": nm, "cache": ctx._sssp, "computed_remedies": remedies}
+                       "feasible": feasible, "nm": nm, "cache": ctx._sssp, "computed_remedies": remedies,
+                       "graph": ctx.G, "loading_hours": loading_hours}
     if gemma_error:
         out["gemma_error"] = gemma_error
     if remedy_error:
@@ -265,7 +270,7 @@ def enrich_with_ai(ctx: dict, client: GemmaClient, reasoner: Optional[Reasoner] 
         if feasible or not ctx["usable"]:
             return []
         return gemma_remedies(client, ctx["network"], ctx["usable"], ctx["dest_node"], req, plans,
-                              ctx["computed_remedies"], nm, ctx["cache"])
+                              ctx["computed_remedies"], nm, ctx["cache"], ctx["graph"], ctx["loading_hours"])
 
     with ThreadPoolExecutor(2) as ex:
         f_explain, f_remedy = ex.submit(explain), ex.submit(propose)

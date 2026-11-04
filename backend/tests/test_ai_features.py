@@ -5,15 +5,11 @@
 import datetime as dt
 
 import pytest
-from fastapi.testclient import TestClient
 
-from gis_backend.api import create_app
-from gis_backend.config import Settings
 from gis_backend.gemma_reasoner import LiveGemmaReasoner
 from gis_backend.intake import NEPAL_TZ, parse_order
-from gis_backend.store import WarehouseStore
-
-from .helpers import LAT0, LNG0, grid_network
+from .authkit import Harness
+from .helpers import LAT0, LNG0
 
 
 class StubAI(LiveGemmaReasoner):
@@ -78,17 +74,29 @@ def test_intake_rejects_empty_and_oversized():
 
 
 # ------------------------------------------------------------- API-level AI
+class _Client:
+    """Context manager yielding a signed-in owner (so the tests below read like the previous single-client version)."""
+
+    def __init__(self, tmp_path, ai, require=False):
+        self.h = Harness(tmp_path, ai=ai, require_gemma=require)
+
+    def __enter__(self):
+        self.h.__enter__()
+        self.c = self.h.as_role("owner")
+        return self.c
+
+    def __exit__(self, *exc):
+        return self.h.__exit__(*exc)
+
+
 def make_client(tmp_path, ai, require=False):
-    cfg = Settings(data_dir=tmp_path, database_url=f"sqlite:///{tmp_path}/t.db", admin_api_key="k",
-                   weather_enabled=False, require_gemma=require)
-    app = create_app(cfg, network=grid_network(4), store=WarehouseStore(cfg.database_url), client=ai)
-    return TestClient(app)
+    return _Client(tmp_path, ai, require)
 
 
 def seed(c, extra=False):
     spec = [("A", (0, 0), 900, 4), ("B", (6, 6), 120, 1)] + ([("C", (5, 0), 900, 4)] if extra else [])
     for wid, (n, e), stock, veh in spec:
-        assert c.put(f"/warehouses/{wid}", headers={"X-API-Key": "k"}, json={
+        assert c.put(f"/warehouses/{wid}", json={
             "name": wid, "lat": LAT0 + n / 111.32, "lng": LNG0 + e / 98.5, "units_in_stock": stock,
             "vehicles_available": veh}).status_code == 200
 
@@ -265,3 +273,13 @@ def test_fill_placeholders_contract():
     assert fill_placeholders("In {arrival} hours over {distance} km, {fuel} litres.", vals) == "In 45 min over 31 km, 8 L."
     assert fill_placeholders("In 45 min", vals) is None and fill_placeholders("In {unknown}", vals) is None
     assert fill_placeholders("No figures at all.", vals) == "No figures at all."
+
+
+def test_another_organisations_ai_step_is_a_404(tmp_path):
+    ai = StubAI(explain=[{"chosen_index": 0, "explanation": "Fine."}])
+    with Harness(tmp_path, ai=ai) as h:
+        a, b = h.as_role("owner", org_name="Acme"), h.as_role("owner", org_name="Beta")
+        seed(a)
+        first = run(a, 100, 48)
+        assert b.post(f"/optimize-route/{first['result_id']}/ai").status_code == 404
+        assert a.post(f"/optimize-route/{first['result_id']}/ai").status_code == 200

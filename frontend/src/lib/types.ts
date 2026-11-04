@@ -189,3 +189,61 @@ export type AiPatch = Partial<
     | "chosen_matches_policy"
   >
 > & { ai: { status: "done" | "partial"; error?: string } };
+
+export type Role = "viewer" | "member" | "admin" | "owner";
+export const ROLE_RANK: Record<Role, number> = { viewer: 1, member: 2, admin: 3, owner: 4 };
+
+export interface Me {
+  user: { id: string; email: string; name: string };
+  organisation: { id: string; name: string };
+  role: Role;
+}
+
+export interface OrderRecord {
+  id: string;
+  created_at: string;
+  by: string | null;
+  destination: string;
+  lat: number;
+  lng: number;
+  quantity: number;
+  deadline_hours: number;
+  status: "feasible" | "infeasible";
+  plan_type: PlanType | null;
+  sources: string[];
+  eta_hours: number | null;
+  p_late: number | null;
+}
+
+export interface Closure {
+  id: string;
+  lat: number;
+  lng: number;
+  radius_m: number;
+  reason: string;
+  until: string | null;
+}
+
+export interface OrgSettings {
+  organisation: string;
+  loading_minutes: number;
+}
+
+export interface Team {
+  members: {
+    user_id: string;
+    email: string;
+    name: string;
+    role: Role;
+    last_login_at: string | null;
+  }[];
+  invites: { id: string; email: string; role: Role; expires_at: string }[];
+}
+
+export interface AuditEntry {
+  ts: string;
+  user: string | null;
+  action: string;
+  target: string;
+  detail: Record<string, unknown>;
+}

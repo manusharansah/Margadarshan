@@ -1,15 +1,22 @@
 # Local full stack:  docker compose up --build
-# Put a real network artifact at ./backend/data/network.json.gz first (see docs/DATA_SOURCES.md).
+# Needs a network file at ./backend/data/network.json.gz (docs/DATA_SOURCES.md) and sign-in settings in a .env file next to
+# this one (docs/SECURITY.md). For a quick look without a real identity provider, run scripts/fake_oidc_server.py on the host.
 services:
   backend:
     build: ./backend
     environment:
       DATABASE_URL: sqlite:////data/marga.db
-      MARGA_ADMIN_API_KEY: ${MARGA_ADMIN_API_KEY:-}
+      OIDC_ISSUER: ${OIDC_ISSUER:-https://accounts.google.com}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?set OIDC_CLIENT_ID}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      MARGA_PUBLIC_URL: ${MARGA_PUBLIC_URL:-http://localhost:3000}
+      MARGA_COOKIE_SECURE: ${MARGA_COOKIE_SECURE:-false}   # true behind HTTPS; the __Host- cookie needs it
+      MARGA_BOOTSTRAP_OWNER_EMAIL: ${MARGA_BOOTSTRAP_OWNER_EMAIL:?set the first owner's email}
       GEMMA_API_KEY: ${GEMMA_API_KEY:-}
-      CORS_ORIGINS: http://localhost:3000
+      MARGA_REQUIRE_GEMMA: ${MARGA_REQUIRE_GEMMA:-false}
+      CORS_ORIGINS: ${MARGA_PUBLIC_URL:-http://localhost:3000}
     volumes: ["./backend/data:/data"]
-    ports: ["8000:8000"]
+    expose: ["8000"]
   frontend:
     build: ./frontend
     environment:

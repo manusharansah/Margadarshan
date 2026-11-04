@@ -8,8 +8,8 @@ cp .env.example .env && npm ci
 npm run dev                                          # http://localhost:3000
 NITRO_PRESET=node-server npm run build               # production server in .output/, used by the Dockerfile
 npx tsc --noEmit && npm run lint
-BASE_URL=http://localhost:3000 node e2e/smoke.mjs    # browser smoke test; needs the backend and playwright
+BASE_URL=http://localhost:3000 AI_E2E=1 node e2e/smoke.mjs   # browser smoke test with real sign-in; see the script header
 ```
 
-Set `AI_E2E=1` to include the AI flows. The pages are Plan (`/`), Inventory (`/inventory`) and Data (`/data`). The
+Set `AI_E2E=1` to include the AI flows. The pages are Plan (`/`), Inventory, Orders, Team, Data and Account, behind sign-in (`/login`). The
 Lovable template builds for Cloudflare by default, so containers need `NITRO_PRESET=node-server`.

@@ -6,7 +6,7 @@
 | Place names | Overture divisions, with English and Devanagari names | Destination search |
 | Elevation | NASA SRTM 1 arc-second from the AWS Open Data Terrain Tiles bucket | Grade, climb, hillslope angle |
 | Rainfall | Open-Meteo forecast API, past 3 days plus next 24 hours | Hazard multiplier |
-| Past incidents | Optional CSV with latitude and longitude, such as a BIPAD export | Incident proximity score |
+| Past incidents | Optional CSV with latitude and longitude, such as a BIPAD export. Not loaded in the current build. | Incident proximity score |
 | Warehouses and fleet | You | Stock and vehicles. No public source exists. |
 
 ## Build the road network
@@ -36,13 +36,12 @@ See [INVENTORY_FORMAT.md](INVENTORY_FORMAT.md).
 
 ## Known limits
 
-* The hazard score is 0.6 times the terrain score plus 0.4 times the incident score, or the terrain score alone
-  when there is no incident data. Rain then multiplies it by up to 2.5. The terrain score ramps from 0 at a 15 degree
-  hillslope to 1 at 45 degrees. The incident score is 1 minus e to the power of minus n over 3, for n incidents within
-  2 km. The rain index is rainfall in millimetres divided by 200. These are documented heuristics. Flooding is not
-  modelled separately.
+The evidence behind each model parameter, and what it would take to validate it, is in [MODEL.md](MODEL.md). In short:
+
+* The hazard score is a screening index, not a calibrated probability. No incident catalogue could be loaded here.
 * Grade comes from 30 m elevation data smoothed over about 150 m. It can be off by several percent on short stretches.
-* In the Kathmandu and Kavre build, 76% of road pieces carry no surface tag. Their surface comes from the road class.
-* One-way roads, turn restrictions, live traffic and closures are not modelled.
-* Fuel assumes 0.30 L/km for a loaded 8 tonne truck on flat paved road, plus the energy to climb. Replace the figure with your own logs.
-* Set `MARGA_LOADING_HOURS` to add handling time per pickup. The default is zero.
+* 76% of road pieces in the Kathmandu and Kavre build carry no surface tag. Their surface is estimated from tagged roads of
+  the same class, which is right for about 84% of held-out tagged roads.
+* About 4.5% of road pieces are one-way and are routed as such. Turn restrictions and live traffic are not modelled.
+* Road closures are entered by hand for each organisation on the Inventory page.
+* Handling time per pickup is an organisation setting that starts at zero.
