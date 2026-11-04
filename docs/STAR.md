@@ -86,7 +86,7 @@ code. Alternatives for impossible orders are re-run through the planner. The ris
 stretches. `MARGA_REQUIRE_GEMMA` lets production refuse to start without the model. A labelled stand-in server lets the real
 HTTP client and interface run without a key.
 
-Result. Seventeen new tests cover bad dates, malformed output, out-of-range and infeasible proposals, and invalid
+Result. Eighteen new tests cover bad dates, malformed output, out-of-range and infeasible proposals, and invalid
 choices. The browser test covers the flows against the stand-in. Real-model quality is untested until a key is added.
 
 ## 7. Production readiness
