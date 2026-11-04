@@ -119,6 +119,14 @@ def parse_maxspeed(tags: dict) -> Optional[float]:
     return value if 5 <= value <= 120 else None
 
 
+def oneway_flag(tags: dict) -> int:
+    """1 = forward only, -1 = reverse only, 0 = two-way (OSM ``oneway`` tag; roundabouts are one-way)."""
+    v = str(tags.get("oneway", "")).lower()
+    if v in {"yes", "true", "1"} or tags.get("junction") == "roundabout":
+        return 1
+    return -1 if v == "-1" else 0
+
+
 def is_drivable(tags: dict) -> bool:
     if tags.get("area") == "yes":
         return False

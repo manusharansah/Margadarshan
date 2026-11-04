@@ -2,8 +2,9 @@
 Live rainfall from Open-Meteo (https://open-meteo.com, free for non-commercial use).
 
 For a coarse grid over the network's bounding box we fetch hourly precipitation
-for the previous 3 days and the next 1 day, sum it, and convert it to a 0..1
-"rain index" that amplifies landslide/flood hazard (see ``edge_weight``).
+for the previous 3 days and the next 1 day and compare the worst 24, 48 and 72 hour
+accumulations with the Nepal Himalaya landslide rainfall threshold of Dahal and Hasegawa
+(2008). The result is a 0..1 "rain index" that amplifies landslide hazard (see ``edge_weight``).
 Results are cached for ``ttl`` seconds. If the service is unreachable the index
 is 0 everywhere and ``status()`` says so - the API never invents weather.
 """
@@ -16,7 +17,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import requests
 
-from .edge_weight import rain_index_from_mm
+from .edge_weight import rain_index_from_hourly
 
 OPEN_METEO = "https://api.open-meteo.com/v1/forecast"
 GRID_STEP_DEG = 0.1  # ~11 km
@@ -32,6 +33,7 @@ class WeatherService:
         self._session = session or requests.Session()
         self._lock = threading.Lock()
         self._mm: Dict[Tuple[int, int], float] = {}
+        self._index: Dict[Tuple[int, int], float] = {}
         self._fetched_at: Optional[float] = None
         self._error: Optional[str] = None
         self._failed_at: Optional[float] = None
@@ -40,6 +42,7 @@ class WeatherService:
         """Fetch precipitation for every grid point. Returns True on success."""
         pts = [(la, ln) for la in self.lats for ln in self.lngs]
         result: Dict[Tuple[int, int], float] = {}
+        index: Dict[Tuple[int, int], float] = {}
         try:
             for chunk_start in range(0, len(pts), 50):
                 chunk = pts[chunk_start:chunk_start + 50]
@@ -55,14 +58,17 @@ class WeatherService:
                     raise ValueError(f"Open-Meteo returned {len(body)} locations for {len(chunk)} requested")
                 for (la, ln), loc in zip(chunk, body):
                     vals = [v for v in loc["hourly"]["precipitation"] if v is not None]
-                    result[(self._ix(self.lats, la), self._ix(self.lngs, ln))] = float(sum(vals))
+                    key = (self._ix(self.lats, la), self._ix(self.lngs, ln))
+                    result[key] = float(sum(vals))
+                    index[key] = rain_index_from_hourly(vals)
         except (requests.RequestException, KeyError, ValueError, TypeError) as exc:
             with self._lock:
                 self._error = f"{type(exc).__name__}: {exc}"
                 self._failed_at = time.time()
             return False
         with self._lock:
-            self._mm, self._fetched_at, self._error, self._failed_at = result, time.time(), None, None
+            self._mm, self._index = result, index
+            self._fetched_at, self._error, self._failed_at = time.time(), None, None
         return True
 
     @staticmethod
@@ -82,8 +88,12 @@ class WeatherService:
                 return None
             return self._mm.get((self._ix(self.lats, lat), self._ix(self.lngs, lng)))
 
+    def rain_index(self, lat: float, lng: float) -> float:
+        with self._lock:
+            return self._index.get((self._ix(self.lats, lat), self._ix(self.lngs, lng)), 0.0)
+
     def rain_index_fn(self) -> Callable[[float, float], float]:
-        return lambda lat, lng: rain_index_from_mm(self.precipitation_mm(lat, lng))
+        return self.rain_index
 
     def status(self) -> dict:
         with self._lock:
@@ -94,6 +104,8 @@ class WeatherService:
                 "fetched_at": self._fetched_at,
                 "grid_points": len(self.lats) * len(self.lngs),
                 "max_precip_mm": round(max(vals), 1) if vals else None,
+                "max_rain_index": round(max(self._index.values()), 2) if self._index else None,
+                "threshold": "Dahal and Hasegawa (2008): I = 73.9 D^-0.79",
                 "mean_precip_mm": round(sum(vals) / len(vals), 1) if vals else None,
                 "error": self._error,
             }

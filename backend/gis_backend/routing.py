@@ -14,38 +14,29 @@ import networkx as nx
 from .models import LatLngElev
 
 
-def _fuel(data: dict, u: int) -> float:
-    return data["fuel_ab"] if u == data["a"] else data["fuel_ba"]
-
-
-def path_metrics(G: nx.Graph, path: List[int]) -> Dict[str, float]:
+def path_metrics(G: nx.DiGraph, path: List[int]) -> Dict[str, float]:
     dist = time_h = cost = fuel = ascent = descent = hazard = 0.0
     for u, v in zip(path, path[1:]):
         d = G[u][v]
-        e = d["edge"]
-        fwd = u == d["a"]
         dist += d["length"]
         time_h += d["time"]
         cost += d["weight"]
-        fuel += _fuel(d, u)
-        ascent += e.ascent_ab_m if fwd else e.descent_ab_m
-        descent += e.descent_ab_m if fwd else e.ascent_ab_m
+        fuel += d["fuel"]
+        ascent += d["ascent"]
+        descent += d["descent"]
         hazard = max(hazard, d["hazard"])
     return {"distance_km": dist, "time_hours": time_h, "edge_cost": cost, "fuel_litres": fuel,
             "ascent_m": ascent, "descent_m": descent, "max_hazard": hazard}
 
 
-def path_geometry(G: nx.Graph, path: List[int]) -> List[LatLngElev]:
-    """Road polyline (lat, lng, elevation) for a node path, oriented along travel."""
+def path_geometry(G: nx.DiGraph, path: List[int]) -> List[LatLngElev]:
+    """Road polyline (lat, lng, elevation) for a node path, in the direction of travel."""
     if len(path) == 1:
         n = G.nodes[path[0]]
         return [(n["lat"], n["lng"], n["elev"])]
     out: List[LatLngElev] = []
     for u, v in zip(path, path[1:]):
-        d = G[u][v]
-        geom = list(d["edge"].geometry)
-        if u != d["a"]:
-            geom.reverse()
+        geom = G[u][v]["geometry"]
         out.extend(geom if not out else geom[1:])
     return out
 
@@ -152,7 +143,7 @@ def held_karp_tsp(G: nx.Graph, start: int, stops: List[int], sssp=None) -> Optio
     return {"visit_order": [pts[i] for i in visit], "path": path, "edge_cost": cost}
 
 
-def path_hotspots(G: nx.Graph, path: List[int], k: int = 3) -> List[dict]:
+def path_hotspots(G: nx.DiGraph, path: List[int], k: int = 3) -> List[dict]:
     """The k riskiest distinct road stretches on a path (grounding for the risk briefing)."""
     best: Dict[str, dict] = {}
     for u, v in zip(path, path[1:]):
@@ -163,6 +154,6 @@ def path_hotspots(G: nx.Graph, path: List[int], k: int = 3) -> List[dict]:
         cur = best.get(label)
         if cur is None or d["hazard"] > cur["hazard"]:
             best[label] = {"road": label, "hazard": round(d["hazard"], 2), "rain_index": round(d["rain_index"], 2),
-                           "grade_pct": round(e.slope_pct, 1), "surface": e.road_type,
+                           "grade_pct": round(e.slope_pct, 1), "surface": e.road_type, "oneway": bool(e.oneway),
                            "lat": round(mid[0], 5), "lng": round(mid[1], 5)}
     return sorted(best.values(), key=lambda h: -h["hazard"])[:k]

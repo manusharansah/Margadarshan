@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import time
 from dataclasses import dataclass
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import requests
 
@@ -39,6 +41,7 @@ class Selection:
     explanation: str
     source: str  # "gemma" | "deterministic"
     risk_note: str = ""
+    risk_source: str = "deterministic"
 
 
 def compact(plan: CandidatePlan, name: Callable[[str], str]) -> dict:
@@ -105,6 +108,56 @@ class DeterministicReasoner(Reasoner):
         return Selection(0, text, "deterministic", deterministic_risk_note(p))
 
 
+def _response_text(r: requests.Response) -> str:
+    try:
+        parts = r.json()["candidates"][0]["content"]["parts"]
+        return "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
+    except (KeyError, IndexError, TypeError, ValueError):
+        return ""
+
+
+def _finish_reason(r: requests.Response) -> str:
+    try:
+        return str(r.json()["candidates"][0].get("finishReason", "no reason given"))
+    except (KeyError, IndexError, TypeError, ValueError):
+        return "no candidates"
+
+
+def _api_error_message(r: requests.Response) -> str:
+    try:
+        return str((r.json().get("error") or {}).get("message", ""))[:160]
+    except ValueError:
+        return ""
+
+
+# ------------------------------------------------------------------ number guard
+PLACEHOLDER = re.compile(r"\{([a-z_0-9]+)\}")
+
+
+# Placeholders already carry their unit ("45 min"); models sometimes add it again ("45 min hours", "31 km km").
+_DUP_UNIT = re.compile(r"(\b\d+(?:\.\d+)? (?:min|h|km|L|%))\s+(?:minutes?|hours?|hrs?|kilomet(?:re|er)s?|km|litres?|liters?|percent)\b")
+
+
+def _placeholder_problem(text: str, values: Dict[str, str]) -> str:
+    if re.search(r"\d", PLACEHOLDER.sub("", text)):
+        return "it contained a digit"
+    unknown = sorted(set(PLACEHOLDER.findall(text)) - set(values))
+    return f"unknown placeholder {', '.join(unknown)}" if unknown else "empty or malformed"
+
+
+def fill_placeholders(text: str, values: Dict[str, str]) -> Optional[str]:
+    """Insert verified figures for ``{name}`` placeholders. Returns None if the model wrote any digit of its own
+    or used a placeholder we did not offer: a model-typed number can never reach a dealer."""
+    if re.search(r"\d", PLACEHOLDER.sub("", text)):
+        return None
+    names = set(PLACEHOLDER.findall(text))
+    if not names <= set(values):
+        return None
+    out = PLACEHOLDER.sub(lambda m: values[m.group(1)], text)
+    out = _DUP_UNIT.sub(r"\1", out)
+    return None if "{" in out or "}" in out else out
+
+
 class GemmaClient:
     """Thin Google AI Studio client returning schema-constrained JSON. Needs ``GEMMA_API_KEY``."""
 
@@ -112,12 +165,13 @@ class GemmaClient:
     DEFAULT_MODEL = "gemma-4-26b-a4b-it"
 
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None,
-                 endpoint: Optional[str] = None, timeout: float = 30.0,
-                 session: Optional[requests.Session] = None):
+                 endpoint: Optional[str] = None, timeout: float = 90.0,
+                 session: Optional[requests.Session] = None, max_attempts: int = 3, backoff_seconds: float = 2.0):
         self.api_key = api_key or os.environ.get("GEMMA_API_KEY")
         self.model = model or os.environ.get("GEMMA_MODEL", self.DEFAULT_MODEL)
         self.endpoint = endpoint or os.environ.get("GEMMA_ENDPOINT", self.ENDPOINT)
         self.timeout = timeout
+        self.max_attempts, self.backoff_seconds = max_attempts, backoff_seconds
         self._session = session or requests.Session()
 
     @property
@@ -129,22 +183,40 @@ class GemmaClient:
             raise RuntimeError("GEMMA_API_KEY is not set")
         return self._parse(self._call(prompt, schema))
 
+    RETRY_STATUSES = {429, 500, 502, 503, 504}
+
     def _call(self, prompt: str, schema: dict) -> str:
-        body = {
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json",
-                                 "responseJsonSchema": schema},
-        }
-        try:
-            r = self._session.post(self.endpoint.format(model=self.model), params={"key": self.api_key},
-                                   json=body, timeout=self.timeout)
-            r.raise_for_status()
-            return r.json()["candidates"][0]["content"]["parts"][0]["text"]
-        except requests.RequestException as exc:
-            # Never echo the request URL (it carries the API key).
-            raise RuntimeError(f"Gemma API call failed: {type(exc).__name__}") from None
-        except (KeyError, IndexError, TypeError, ValueError) as exc:
-            raise RuntimeError("Unexpected Gemma response shape") from exc
+        last = "no attempt"
+        empties = 0
+        for attempt in range(self.max_attempts):
+            # Retries nudge the temperature: an empty RECITATION/SAFETY response repeats at the same setting.
+            body = {
+                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0.1 + 0.4 * empties, "responseMimeType": "application/json",
+                                     "responseJsonSchema": schema},
+            }
+            try:
+                r = self._session.post(self.endpoint.format(model=self.model), params={"key": self.api_key},
+                                       json=body, timeout=self.timeout)
+            except requests.RequestException as exc:
+                # Never echo the request URL (it carries the API key).
+                last = f"{type(exc).__name__}"
+            else:
+                if r.status_code == 200:
+                    text = _response_text(r)
+                    if text:
+                        return text
+                    last = f"empty response ({_finish_reason(r)})"
+                    empties += 1
+                    if empties >= 2:
+                        break   # the same refusal twice will not change; do not make the dealer wait
+                else:
+                    last = f"HTTP {r.status_code}: {_api_error_message(r)}"
+                    if r.status_code not in self.RETRY_STATUSES:
+                        break
+            if attempt + 1 < self.max_attempts:
+                time.sleep(self.backoff_seconds * (2 ** attempt))
+        raise RuntimeError(f"Gemma API call failed: {last}")
 
     @staticmethod
     def _parse(raw: str) -> dict:
@@ -171,8 +243,35 @@ class GemmaClient:
         raise RuntimeError("Gemma did not return valid JSON")
 
 
+def format_hours(h: float) -> str:
+    total = round(h * 60)
+    if total < 1:
+        return "under a minute"
+    hh, mm = divmod(total, 60)
+    return f"{mm} min" if hh == 0 else f"{hh} h" if mm == 0 else f"{hh} h {mm} min"
+
+
+def plan_values(plan: CandidatePlan, request: DeliveryRequest, name: Callable[[str], str]) -> Dict[str, str]:
+    """Verified figures a model may reference by placeholder (it is never allowed to type a number)."""
+    spots = sorted((h for l in plan.legs for h in l.hotspots), key=lambda h: -h["hazard"])[:3]
+    vals = {
+        "arrival": format_hours(plan.total_time_hours), "vehicles": str(plan.vehicles_used),
+        "distance": f"{plan.distance_km:.0f} km", "fuel": f"{plan.fuel_litres:.0f} L",
+        "deadline": format_hours(request.deadline_hours),
+        "margin": format_hours(request.deadline_hours - plan.total_time_hours),
+        "quantity": f"{request.quantity:,}", "sources": ", ".join(name(x) for x in plan.sources_used),
+        "hazard": f"{max((l.max_hazard for l in plan.legs), default=0.0):.2f}",
+    }
+    for i, h in enumerate(spots, 1):
+        vals.update({f"road{i}": h["road"], f"hazard{i}": f"{h['hazard']:.2f}", f"grade{i}": f"{h['grade_pct']:g}%"})
+    return vals
+
+
 class LiveGemmaReasoner(GemmaClient, Reasoner):
-    """Selects among deadline-feasible plans and writes the explanation + grounded risk briefing."""
+    """Selects among deadline-feasible plans and writes the explanation and a grounded risk briefing.
+
+    The model never types a figure. It writes with placeholders such as ``{arrival}`` and ``{road1}``, and code
+    fills them from the verified plan. Text containing any digit of its own is rejected."""
 
     name = "gemma"
     RESPONSE_SCHEMA = {
@@ -183,34 +282,58 @@ class LiveGemmaReasoner(GemmaClient, Reasoner):
     }
 
     def explain(self, request, plans, feasible, name):
-        data = self.generate_json(self._prompt(request, plans, feasible, name), self.RESPONSE_SCHEMA)
-        idx = data.get("chosen_index")
-        explanation = str(data.get("explanation", "")).strip()
-        if not explanation:
-            raise RuntimeError("Gemma returned an empty explanation")
-        if feasible and (not isinstance(idx, int) or isinstance(idx, bool) or not 0 <= idx < len(plans)):
-            raise RuntimeError(f"Gemma returned invalid chosen_index {idx!r} for {len(plans)} plans")
-        chosen = plans[idx] if feasible else None
-        risk = str(data.get("risk_note", "")).strip() or (deterministic_risk_note(chosen) if chosen else "")
-        return Selection(idx if feasible else None, explanation, "gemma", risk)
+        prompt = self._prompt(request, plans, feasible, name)
+        last_problem = ""
+        for attempt in range(2):
+            data = self.generate_json(prompt, self.RESPONSE_SCHEMA)
+            idx = data.get("chosen_index")
+            if feasible and (not isinstance(idx, int) or isinstance(idx, bool) or not 0 <= idx < len(plans)):
+                raise RuntimeError(f"Gemma returned invalid chosen_index {idx!r} for {len(plans)} plans")
+            chosen = plans[idx] if feasible else None
+            if chosen:
+                values = plan_values(chosen, request, name)
+            else:
+                best = min((p.total_time_hours for p in plans), default=None)
+                values = {"quantity": f"{request.quantity:,}", "deadline": format_hours(request.deadline_hours),
+                          **({"best_case": format_hours(best)} if best is not None else {})}
+            raw = str(data.get("explanation", "")).strip()
+            explanation = fill_placeholders(raw, values)
+            if explanation:
+                risk_raw = str(data.get("risk_note", "")).strip()
+                risk = fill_placeholders(risk_raw, values) if risk_raw else None   # unverifiable text is dropped
+                sel = Selection(idx if feasible else None, explanation, "gemma",
+                                risk or (deterministic_risk_note(chosen) if chosen else ""))
+                sel.risk_source = "gemma" if risk else "deterministic"
+                return sel
+            last_problem = _placeholder_problem(raw, values)
+            prompt += (f"\n\nYour previous explanation was rejected ({last_problem}). Write it again with no digits "
+                       f"and only these placeholders: {' '.join('{' + k + '}' for k in values)}.")
+        raise RuntimeError(f"Gemma's explanation was rejected twice ({last_problem}): {raw[:140]!r}")
 
     @staticmethod
     def _prompt(request, plans, feasible, name) -> str:
         body = json.dumps([compact(p, name) for p in plans], indent=1)
-        task = (
-            "Every plan below already meets the deadline. Choose the best one (index into the list). Prefer fewer "
-            "warehouses and vehicles unless another plan is clearly safer (lower hazard) or cheaper. Also write "
-            "risk_note: 1-2 sentences for the driver/dealer about the chosen plan's riskiest stretches, naming the roads "
-            "from riskiest_stretches and citing their hazard, grade or rain figures. Use ONLY those listed stretches; "
-            "if none are listed say no stretch was flagged."
-            if feasible else
-            "No plan meets the deadline. Set chosen_index to null and explain, using only the figures given, why the "
-            "order cannot be fulfilled and what would have to change (deadline, quantity). Leave risk_note empty."
-        )
+        if feasible:
+            task = (
+                "Every plan below already meets the deadline. Choose the best one (chosen_index = its position in the "
+                "list). Prefer fewer warehouses and vehicles unless another plan is clearly safer (lower hazard).\n"
+                "Write explanation (2-3 plain sentences for a non-technical dealer) and risk_note (1-2 sentences for the "
+                "driver about the riskiest stretches of the plan you chose).\n"
+                "STRICT RULE: never write a digit or spell out a quantity. Each placeholder already includes its unit, so never add one "
+                "(write {arrival}, not {arrival} hours). Refer to figures only with these placeholders, "
+                "which refer to the plan you chose: {arrival} {vehicles} {distance} {fuel} {deadline} {margin} {sources} "
+                "{hazard}, and for the risk note {road1} {hazard1} {grade1} {road2} {hazard2} {grade2}. Write {road1} "
+                "instead of a road name. Use only what the plans show; do not invent causes or events."
+            )
+        else:
+            task = (
+                "No plan meets the deadline. Set chosen_index to null. Write explanation (2-3 plain sentences): why it "
+                "cannot be delivered and what would have to change. Leave risk_note empty.\n"
+                "STRICT RULE: never write a digit. Refer to figures only with these placeholders: {quantity} {deadline} "
+                "{best_case}."
+            )
         return (
-            "You advise a dealer-delivery planner in Nepal's hills. All numbers are precomputed and verified: do not "
-            "recompute or alter them; reason only over what is given. Write the explanation in 2-4 plain sentences "
-            "for a non-technical dealer.\n\n"
+            "You advise a dealer-delivery planner in Nepal's hills. All figures are precomputed and verified.\n\n"
             f"Order: {request.quantity} units to {request.destination_name} within {request.deadline_hours:g} hours.\n"
             f"Plans (0-indexed): {body}\n\n{task}\n"
             'Respond with exactly one JSON object: {"chosen_index": int|null, "explanation": string, "risk_note": string}'

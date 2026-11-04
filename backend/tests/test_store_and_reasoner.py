@@ -126,10 +126,10 @@ def test_compact_has_no_geometry():
 
 # ----------------------------------------------------------------- weather
 class WxSession:
-    """Mimics Open-Meteo's multi-location response shape (one object per coordinate)."""
+    """Mimics Open-Meteo's multi-location response shape (one object per coordinate, hourly series)."""
 
-    def __init__(self, mm_per_point, fail=False):
-        self.mm, self.fail, self.calls = mm_per_point, fail, 0
+    def __init__(self, hourly, fail=False):
+        self.hourly, self.fail, self.calls = hourly, fail, 0
 
     def get(self, url, params=None, timeout=None):
         self.calls += 1
@@ -138,21 +138,28 @@ class WxSession:
         n = len(params["latitude"].split(","))
         r = requests.Response()
         r.status_code = 200
-        r._content = json.dumps([{"hourly": {"precipitation": [self.mm / 4, None, self.mm / 4, self.mm / 2]}}] * n).encode()
+        r._content = json.dumps([{"hourly": {"precipitation": self.hourly}}] * n).encode()
         return r
 
 
-def test_weather_sums_hourly_precip_and_maps_to_index():
-    w = WeatherService((27.5, 85.4, 27.7, 85.6), session=WxSession(80.0))
+def test_weather_converts_hourly_rain_to_the_landslide_threshold_index():
+    series = [None] + [6.0] * 24 + [0.0] * 71            # 144 mm in 24 h = the Nepal Himalaya threshold
+    w = WeatherService((27.5, 85.4, 27.7, 85.6), session=WxSession(series))
     assert w.refresh()
-    assert w.precipitation_mm(27.6, 85.5) == pytest.approx(80.0)
-    assert w.rain_index_fn()(27.6, 85.5) == pytest.approx(0.4)
+    assert w.precipitation_mm(27.6, 85.5) == pytest.approx(144.0)
+    assert w.rain_index_fn()(27.6, 85.5) == pytest.approx(1.0, abs=0.01)
     st = w.status()
-    assert st["available"] and st["max_precip_mm"] == 80.0
+    assert st["available"] and st["max_precip_mm"] == 144.0 and st["max_rain_index"] == pytest.approx(1.0, abs=0.01)
+    assert "Dahal" in st["threshold"]
+
+
+def test_light_rain_gives_a_low_index():
+    w = WeatherService((27.5, 85.4, 27.7, 85.6), session=WxSession([0.1] * 96))
+    assert w.refresh() and w.rain_index_fn()(27.6, 85.5) < 0.1
 
 
 def test_weather_failure_is_reported_not_invented():
-    w = WeatherService((27.5, 85.4, 27.7, 85.6), session=WxSession(0, fail=True))
+    w = WeatherService((27.5, 85.4, 27.7, 85.6), session=WxSession([], fail=True))
     assert not w.refresh()
     assert w.precipitation_mm(27.6, 85.5) is None and w.rain_index_fn()(27.6, 85.5) == 0
     st = w.status()
@@ -170,3 +177,62 @@ def test_shipped_example_inventories_are_valid_and_inside_study_area(tmp_path, f
     assert len({w.node_id for w in ws}) == count and all(w.node_id.startswith(prefix) for w in ws)
     assert all(27.45 <= w.lat <= 27.80 and 85.25 <= w.lng <= 85.80 for w in ws)  # default ingest bbox
     assert any(w.vehicles_available == 0 for w in ws)  # exercises the stock-but-no-vehicle case
+
+
+# --------------------------------------------------- client retries and errors
+class SeqSession:
+    """Returns queued (status, body) pairs; records the temperature used on each attempt."""
+
+    def __init__(self, *responses):
+        self.responses, self.temps = list(responses), []
+
+    def post(self, url, params=None, json=None, timeout=None):
+        self.temps.append(json["generationConfig"]["temperature"])
+        status, body = self.responses.pop(0)
+        r = requests.Response()
+        r.status_code = status
+        r._content = __import__("json").dumps(body).encode()
+        r.headers["content-type"] = "application/json"
+        return r
+
+
+def ok(text):
+    return 200, {"candidates": [{"content": {"parts": [{"text": text}]}, "finishReason": "STOP"}]}
+
+
+def client(*responses, attempts=3):
+    from gis_backend.gemma_reasoner import GemmaClient
+    return GemmaClient(api_key="SECRET", session=SeqSession(*responses), max_attempts=attempts, backoff_seconds=0)
+
+
+def test_client_retries_transient_http_errors_then_succeeds():
+    c = client((503, {"error": {"message": "high demand"}}), (500, {"error": {"message": "internal"}}), ok('{"a": 1}'))
+    assert c.generate_json("p", {}) == {"a": 1} and len(c._session.temps) == 3
+
+
+def test_client_does_not_retry_client_errors_and_reports_the_status():
+    c = client((400, {"error": {"message": "API key not valid"}}))
+    with pytest.raises(RuntimeError) as e:
+        c.generate_json("p", {})
+    assert "HTTP 400" in str(e.value) and "API key not valid" in str(e.value) and "SECRET" not in str(e.value)
+    assert len(c._session.temps) == 1
+
+
+def test_client_gives_up_after_the_attempt_limit():
+    c = client(*[(503, {"error": {"message": "busy"}})] * 3)
+    with pytest.raises(RuntimeError, match="HTTP 503: busy"):
+        c.generate_json("p", {})
+    assert len(c._session.temps) == 3
+
+
+def test_empty_recitation_response_retries_warmer_then_fails_fast():
+    empty = (200, {"candidates": [{"finishReason": "RECITATION"}]})
+    c = client(empty, empty, ok('{"never": "reached"}'))
+    with pytest.raises(RuntimeError, match="RECITATION"):
+        c.generate_json("p", {})
+    assert c._session.temps == [0.1, pytest.approx(0.5)]          # second try is warmer; no third try
+
+
+def test_thought_parts_are_ignored_when_reading_the_answer():
+    body = (200, {"candidates": [{"content": {"parts": [{"text": "thinking...", "thought": True}, {"text": '{"a": 2}'}]}}]})
+    assert client(body).generate_json("p", {}) == {"a": 2}

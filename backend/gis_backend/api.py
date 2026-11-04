@@ -17,6 +17,10 @@ from __future__ import annotations
 
 import hmac
 import logging
+import threading
+import time
+import uuid
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from typing import Optional
@@ -31,11 +35,35 @@ from .gemma_reasoner import GemmaClient, get_client
 from .intake import MAX_TEXT, parse_order
 from .models import DeliveryRequest, StorageNode
 from .network import Network, NetworkUnavailable
-from .service import process_request
+from .service import enrich_with_ai, process_request
 from .store import WarehouseStore, validate
 from .weather import WeatherService
 
 log = logging.getLogger("marga")
+
+
+class ResultCache:
+    """Short-lived store of computed answers so the AI step can reuse their plans (15 min, 200 entries)."""
+
+    def __init__(self, ttl: float = 900.0, size: int = 200):
+        self._d: "OrderedDict[str, tuple]" = OrderedDict()
+        self._lock, self.ttl, self.size = threading.Lock(), ttl, size
+
+    def put(self, ctx: dict) -> str:
+        rid = uuid.uuid4().hex
+        with self._lock:
+            self._d[rid] = (time.time() + self.ttl, ctx)
+            while len(self._d) > self.size:
+                self._d.popitem(last=False)
+        return rid
+
+    def get(self, rid: str) -> Optional[dict]:
+        with self._lock:
+            hit = self._d.get(rid)
+            if not hit or hit[0] < time.time():
+                self._d.pop(rid, None)
+                return None
+            return hit[1]
 
 
 class RouteRequestIn(BaseModel):
@@ -67,6 +95,7 @@ def create_app(settings: Optional[Settings] = None, network: Optional[Network] =
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.client = client if client is not None else get_client()
+        app.state.results = ResultCache()
         if cfg.require_gemma and app.state.client is None:
             raise RuntimeError("MARGA_REQUIRE_GEMMA is set but GEMMA_API_KEY is missing - refusing to start "
                                "without the AI layer.")
@@ -181,11 +210,27 @@ def create_app(settings: Optional[Settings] = None, network: Optional[Network] =
                                quantity=req.quantity, deadline_hours=req.deadline_hours,
                                destination_name=req.destination_name)
         try:
-            return process_request(n, request.app.state.store.list(), dreq, weather=weather_status,
-                                   reasoner=request.app.state.client,
-                                   client=request.app.state.client)
+            out = process_request(n, request.app.state.store.list(), dreq, weather=weather_status,
+                                  client=request.app.state.client, defer_ai=True)
+            ctx = out.pop("_ctx", None)
+            if ctx is not None:
+                out["result_id"] = request.app.state.results.put(ctx)
+            return out
         except ValueError as exc:  # destination outside the loaded network
             raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/optimize-route/{result_id}/ai")
+    def optimize_route_ai(result_id: str, request: Request):
+        """Model-written explanation, risk briefing and proposals for an answer already returned by /optimize-route."""
+        ctx = request.app.state.results.get(result_id)
+        client: Optional[GemmaClient] = request.app.state.client
+        if ctx is None:
+            raise HTTPException(404, "That answer expired. Run the order again.")
+        if client is None:
+            raise HTTPException(503, "AI is not configured (GEMMA_API_KEY missing).")
+        if "patch" not in ctx:
+            ctx["patch"] = enrich_with_ai(ctx, client)
+        return ctx["patch"]
 
     @app.post("/parse-order")
     def parse_order_endpoint(body: ParseOrderIn, request: Request):

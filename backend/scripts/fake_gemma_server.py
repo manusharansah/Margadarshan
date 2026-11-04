@@ -41,9 +41,9 @@ async def generate(action: str, request: Request):
             {"quantity": max(1, min(q // 3, 1500)), "deadline_hours": max(h, 24), "rationale": "[test double] Ship part now, the rest in a later run."},
             {"quantity": q, "deadline_hours": 0.001, "rationale": "[test double] impossible - must be rejected by the planner."}]})
     if "No plan meets the deadline" in prompt:
-        return reply({"chosen_index": None, "explanation": "[test double] Not deliverable as requested.", "risk_note": ""})
-    return reply({"chosen_index": 0, "explanation": "[test double] Option 0 is simplest and within the deadline.",
-                  "risk_note": "[test double] Take care on the listed riskiest stretches."})
+        return reply({"chosen_index": None, "explanation": "[test double] {quantity} units cannot be delivered within {deadline}.", "risk_note": ""})
+    return reply({"chosen_index": 0, "explanation": "[test double] This plan arrives in {arrival} with {vehicles} vehicle(s), {margin} before the {deadline} deadline.",
+                  "risk_note": "[test double] Take care on {road1} (hazard {hazard1})."})
 
 
 if __name__ == "__main__":

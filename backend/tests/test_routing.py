@@ -109,3 +109,54 @@ def test_lazy_best_route_equals_eager_reference(net, s, t):
             assert got["edge_cost"] <= ref["edge_cost"] + 1e-9   # never worse than the eager answer
         else:
             assert got["time_hours"] == pytest.approx(ref["time_hours"])
+
+
+# ------------------------------------------------------------------ one-way roads
+def oneway_net():
+    """Square 0-1-3-2 with a short one-way edge 0->1 and a long two-way detour 0-2-3-1."""
+    from gis_backend.network import Network
+
+    from .helpers import make_artifact
+    xy = {0: (0, 0), 1: (0, 2), 2: (3, 0), 3: (3, 2)}
+    edges = [(0, 1, dict(oneway=1)), (0, 2, {}), (2, 3, {}), (3, 1, {})]
+    return Network(make_artifact(edges, xy))
+
+
+def test_one_way_road_is_used_forward_and_avoided_backward():
+    n = oneway_net()
+    G = n.graph
+    assert G.has_edge(0, 1) and not G.has_edge(1, 0)
+    fwd, back = best_route(G, 0, 1), best_route(G, 1, 0)
+    assert fwd["path"] == [0, 1] and fwd["distance_km"] == pytest.approx(2.0, abs=0.01)
+    assert back["path"] == [1, 3, 2, 0] and back["distance_km"] > 6          # forced onto the long way round
+
+
+def test_reverse_only_flag_swaps_the_allowed_direction():
+    from gis_backend.network import Network
+
+    from .helpers import make_artifact
+    n = Network(make_artifact([(0, 1, dict(oneway=-1)), (1, 2, {}), (2, 0, {})], {0: (0, 0), 1: (0, 2), 2: (2, 1)}))
+    assert n.graph.has_edge(1, 0) and not n.graph.has_edge(0, 1)
+
+
+def test_nodes_that_one_way_streets_strand_are_dropped_from_the_network():
+    from gis_backend.network import Network
+
+    from .helpers import make_artifact
+    # node 3 can be entered (2 -> 3, one-way) but never left: it is outside the strongly connected core
+    n = Network(make_artifact([(0, 1, {}), (1, 2, {}), (2, 0, {}), (2, 3, dict(oneway=1))],
+                              {0: (0, 0), 1: (0, 2), 2: (2, 1), 3: (4, 1)}))
+    assert 3 not in n.graph and n.dropped_nodes == 1
+    with pytest.raises(ValueError):
+        n.snap(LAT0_FAR := 27.6 + 4 / 111.32 + 0.5, 85.5)       # far from every remaining road
+
+
+def test_uphill_arcs_are_slower_than_downhill_arcs():
+    from gis_backend.network import Network
+
+    from .helpers import make_artifact
+    n = Network(make_artifact([(0, 1, dict(ascent_ab_m=120.0, descent_ab_m=0.0, slope_pct=6, length_km=2.0)),
+                               (1, 2, {}), (2, 0, {})], {0: (0, 0), 1: (0, 2), 2: (2, 1)}))
+    G = n.graph
+    assert G[0][1]["time"] > G[1][0]["time"] and G[0][1]["fuel"] > G[1][0]["fuel"]
+    assert G[0][1]["ascent"] == 120 and G[1][0]["descent"] == 120

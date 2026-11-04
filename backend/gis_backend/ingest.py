@@ -24,8 +24,10 @@ import networkx as nx
 from .dem import Dem
 from .hazard import IncidentIndex, terrain_susceptibility
 from .osm import (
-    Piece, classify_surface, DEFAULT_SPEED, fetch_overpass, haversine_km, parse_maxspeed, split_ways,
+    DEFAULT_SURFACE_BY_CLASS, Piece, classify_surface, DEFAULT_SPEED, fetch_overpass, haversine_km, oneway_flag,
+    parse_maxspeed, split_ways,
 )
+from .surface_prior import fit_priors, holdout_accuracy
 
 SAMPLE_SPACING_KM = 0.03  # one DEM sample per ~30 m, the SRTM cell size
 
@@ -105,7 +107,7 @@ def build_edge(piece: Piece, dem: Dem, incidents: Optional[IncidentIndex]) -> Op
         "road_type": surface, "highway": highway, "max_speed_kmph": speed,
         "hazard_terrain": round(terrain_susceptibility(hillslope), 3),
         "hazard_incident": round(hazard_incident, 3),
-        "surface_inferred": inferred, "name": tags.get("name", ""),
+        "surface_inferred": inferred, "name": tags.get("name", ""), "oneway": oneway_flag(tags),
         "geometry": [[round(la, 5), round(ln, 5), round(z, 1)] for (la, ln), z in zip(piece.coords, vert_elev)],
     }
 
@@ -130,6 +132,17 @@ def build_network_from_pieces(pieces: List[Piece], places: List[dict], dem: Dem,
             edges.append(edge)
         if progress and i % 500 == 0:
             print(f"  edges {i}/{len(pieces)}", flush=True)
+
+    # Untagged roads: expected surface from the empirical class prior (see surface_prior.py).
+    tagged = [(e["highway"], e["road_type"], e["length_km"]) for e in edges if not e["surface_inferred"]]
+    priors, glob = fit_priors(tagged)
+    surface_eval = holdout_accuracy(
+        [(e["highway"], e["road_type"], 1.0) for e in edges if not e["surface_inferred"]], DEFAULT_SURFACE_BY_CLASS)
+    for e in edges:
+        if e["surface_inferred"]:
+            mix = priors.get(e["highway"], glob)
+            e["surface_mix"] = [round(x, 3) for x in mix]
+            e["road_type"] = ("paved", "gravel", "rough")[max(range(3), key=lambda k: mix[k])]
 
     # Keep only the largest connected component so every node can reach every other.
     g = nx.Graph()
@@ -157,6 +170,8 @@ def build_network_from_pieces(pieces: List[Piece], places: List[dict], dem: Dem,
         "counts": {"nodes": len(node_xyz), "edges": len(edges), "places": len(places)},
         "network_km": round(total_km, 1),
         "surface_inferred_fraction": round(inferred / len(edges), 3),
+        "surface_prior_eval": surface_eval,
+        "oneway_fraction": round(sum(1 for e in edges if e["oneway"]) / len(edges), 3),
         "max_piece_km": max_piece_km,
     }
     return {

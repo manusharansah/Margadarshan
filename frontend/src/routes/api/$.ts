@@ -12,6 +12,8 @@ const ALLOWED: Record<string, string[]> = {
   GET: ["/health", "/meta", "/network", "/places", "/warehouses"],
   POST: ["/optimize-route", "/parse-order"],
 };
+// The AI step for one answer: POST /optimize-route/<32 hex chars>/ai. Model calls can take over a minute.
+const AI_STEP = /^\/optimize-route\/[a-f0-9]{32}\/ai$/;
 
 function backendBase(): string {
   return (process.env["GIS_API_BASE"] ?? "http://localhost:8000").replace(/\/$/, "");
@@ -20,7 +22,9 @@ function backendBase(): string {
 async function forward(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname.replace(/^\/api/, "") || "/";
-  if (!ALLOWED[request.method]?.includes(path)) {
+  const allowed =
+    ALLOWED[request.method]?.includes(path) || (request.method === "POST" && AI_STEP.test(path));
+  if (!allowed) {
     return Response.json({ detail: "Not found" }, { status: 404 });
   }
   try {
@@ -28,7 +32,7 @@ async function forward(request: Request): Promise<Response> {
       method: request.method,
       headers: { "content-type": request.headers.get("content-type") ?? "application/json" },
       body: request.method === "POST" ? await request.text() : null,
-      signal: AbortSignal.timeout(60_000),
+      signal: AbortSignal.timeout(AI_STEP.test(path) ? 180_000 : 60_000),
     });
     const headers = new Headers();
     headers.set("content-type", upstream.headers.get("content-type") ?? "application/json");

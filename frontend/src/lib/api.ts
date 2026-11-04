@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import type {
+  AiPatch,
   Meta,
   NetworkGeoJSON,
   OptimizeRequest,
@@ -39,6 +40,9 @@ export const optimizeRoute = (body: OptimizeRequest) =>
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
+
+export const optimizeRouteAi = (resultId: string) =>
+  request<AiPatch>(`/optimize-route/${resultId}/ai`, { method: "POST" });
 
 export const parseOrder = (text: string) =>
   request<ParsedOrder>("/parse-order", {

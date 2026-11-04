@@ -168,7 +168,24 @@ def segment_tags(row: dict) -> dict:
     ms = _first(row.get("speed_limits"), "max_speed")
     if isinstance(ms, dict) and ms.get("value"):
         tags["maxspeed"] = f"{ms['value']} {'mph' if ms.get('unit') == 'mph' else 'km/h'}"
+    flag = oneway_from_restrictions(row)
+    if flag:
+        tags["oneway"] = "yes" if flag == 1 else "-1"
     return tags
+
+
+def oneway_from_restrictions(row: dict) -> int:
+    """Overture encodes one-way roads as access denied against one heading: backward denied = forward only."""
+    for ar in row.get("access_restrictions") or []:
+        when = ar.get("when") or {}
+        modes = set(when.get("mode") or [])
+        other = {k for k, v in when.items() if k not in ("mode", "heading") and v}
+        if ar.get("access_type") == "denied" and not other and (not modes or modes & {"motor_vehicle", "vehicle", "truck", "car"}):
+            if when.get("heading") == "backward":
+                return 1
+            if when.get("heading") == "forward":
+                return -1
+    return 0
 
 
 def motor_traffic_denied(row: dict) -> bool:
@@ -176,7 +193,7 @@ def motor_traffic_denied(row: dict) -> bool:
     for ar in row.get("access_restrictions") or []:
         when = ar.get("when") or {}
         modes = set(when.get("mode") or [])
-        other = {k for k, v in when.items() if k != "mode" and v}
+        other = {k for k, v in when.items() if k != "mode" and v}   # heading, time, vehicle limits: not a full closure
         if ar.get("access_type") == "denied" and not other and (not modes or modes & {"motor_vehicle", "vehicle", "truck", "car"}):
             return True
     return False

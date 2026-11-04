@@ -17,6 +17,8 @@ interface Props {
   destinationName: string;
   warehouses: Warehouse[];
   selected: Plan | null;
+  aiState: "none" | "pending" | "done" | "partial";
+  aiError?: string | undefined;
   onSelect: (plan: Plan) => void;
   onApplyRemedy: (quantity: number, deadline: number) => void;
 }
@@ -28,6 +30,8 @@ export function ResultPanel({
   destinationName,
   warehouses,
   selected,
+  aiState,
+  aiError,
   onSelect,
   onApplyRemedy,
 }: Props) {
@@ -131,10 +135,30 @@ export function ResultPanel({
           </span>
         </div>
 
+        {plan.reliability && (
+          <p className="mt-3 text-[12px] leading-snug text-panel-muted" aria-label="Arrival range">
+            Likely {formatHours(plan.reliability.eta_p10)} to{" "}
+            {formatHours(plan.reliability.eta_p90)}.{" "}
+            {plan.reliability.p_late < 0.005
+              ? "No simulated run missed the deadline."
+              : `${Math.round(plan.reliability.p_late * 100)}% of simulated runs miss the deadline.`}
+          </p>
+        )}
+
+        <p className="mt-3 text-[12px] text-panel-muted" aria-label="AI status" aria-live="polite">
+          {aiState === "pending" && (
+            <span className="inline-flex items-center gap-2">
+              <span className="size-2 animate-pulse rounded-full bg-panel-foreground" aria-hidden />
+              AI is writing the explanation. The plan above is already final.
+            </span>
+          )}
+          {aiState === "partial" && <>AI unavailable, so the summary is rule-based. {aiError}</>}
+        </p>
+
         {result.risk_note && (
           <p className="mt-3 text-[12px] leading-snug text-panel-muted" aria-label="Risk briefing">
             <span className="font-semibold text-panel-foreground">Risk briefing</span>
-            {result.explanation_source === "gemma" && (
+            {result.risk_note_source === "gemma" && (
               <span className="ml-1.5 rounded-full border border-panel-border px-1.5 py-0.5 text-[10px]">
                 AI
               </span>

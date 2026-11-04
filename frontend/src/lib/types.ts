@@ -37,6 +37,13 @@ export interface Plan {
   distance_km: number;
   sources_used: string[];
   meets_deadline: boolean;
+  reliability?: {
+    eta_p10: number;
+    eta_p50: number;
+    eta_p90: number;
+    p_late: number;
+    draws: number;
+  };
 }
 
 export interface OptimizeResponse {
@@ -44,6 +51,9 @@ export interface OptimizeResponse {
   explanation: string;
   explanation_source: "gemma" | "deterministic";
   risk_note: string;
+  risk_note_source?: "gemma" | "deterministic";
+  result_id?: string;
+  ai?: { status: "pending" | "done" | "partial"; error?: string };
   remedies: Remedy[];
   remedy_error?: string;
   destination: {
@@ -163,3 +173,19 @@ export interface NetworkGeoJSON {
     };
   }[];
 }
+
+/** What POST /optimize-route/{id}/ai adds to an already-returned answer. */
+export type AiPatch = Partial<
+  Pick<
+    OptimizeResponse,
+    | "explanation"
+    | "explanation_source"
+    | "risk_note"
+    | "risk_note_source"
+    | "remedies"
+    | "chosen_plan"
+    | "alternatives"
+    | "alternatives_total"
+    | "chosen_matches_policy"
+  >
+> & { ai: { status: "done" | "partial"; error?: string } };

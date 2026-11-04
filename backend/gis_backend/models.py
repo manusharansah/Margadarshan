@@ -35,6 +35,9 @@ class RoadEdge:
     hazard_incident: float      # 0..1 historical-incident proximity (0 if no incident data)
     surface_inferred: bool = False
     name: str = ""
+    oneway: int = 0             # 0 two-way, 1 forward only (a -> b), -1 reverse only (b -> a)
+    surface_mix: Optional[tuple] = None   # (p_paved, p_gravel, p_rough) for roads whose surface is inferred
+    curvature_deg_per_km: float = 0.0     # cumulative heading change per km, from the geometry
     geometry: List[LatLngElev] = field(default_factory=list)  # oriented a -> b
 
 

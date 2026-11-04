@@ -37,7 +37,10 @@ await shot(page, "01-initial");
 
 // 2. Pick destination by searching a place name
 await page.getByLabel("Destination").fill("Dhul");
-await page.getByRole("button", { name: /Dhulikhel/ }).first().click();
+await page
+  .getByRole("button", { name: /Dhulikhel/ })
+  .first()
+  .click();
 await page
   .getByText(/27\.\d+, 85\.\d+/)
   .first()
@@ -128,6 +131,15 @@ if (process.env.AI_E2E) {
   await page.getByText("Dhulikhel", { exact: true }).first().waitFor();
   await page.getByRole("button", { name: /Find Best Route/ }).click();
   await page.getByText("Risk briefing").waitFor({ timeout: 30000 });
+  // The answer is final immediately; the AI text arrives afterwards and every figure in it is filled in by code.
+  await page.getByText("Top Recommendation").waitFor();
+  await page.getByRole("button", { name: /Why this plan/ }).click();
+  await page
+    .getByText(/\[test double\] This plan arrives in \d+ ?(min|h)/)
+    .waitFor({ timeout: 60000 });
+  assert.doesNotMatch(await page.getByRole("dialog").innerText(), /[{}]/);
+  await page.keyboard.press("Escape");
+  await page.getByText(/\[test double\] Take care on .+ \(hazard \d\.\d\d\)/).waitFor();
   await shot(page, "08-ai-risk-briefing");
   // Stock-limited order: planner-verified options, some proposed by the model
   const stock = (await (await page.request.get(BASE + "/api/warehouses")).json()).warehouses.reduce(
@@ -140,6 +152,7 @@ if (process.env.AI_E2E) {
     .fill(String(Math.ceil(stock * 1.05)));
   await page.getByRole("button", { name: /Find Best Route/ }).click();
   await page.getByText("Options that would work").waitFor({ timeout: 30000 });
+  await page.getByText("AI suggestion").first().waitFor({ timeout: 90000 }); // computed options show first, AI ones follow
   const opts = await page.locator("[aria-label='Options that would work']").innerText();
   assert.match(opts, /AI suggestion/);
   assert.match(opts, /Computed/);

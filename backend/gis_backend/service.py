@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 from dataclasses import asdict, replace
 from typing import Callable, Dict, List, Optional
@@ -26,6 +27,7 @@ from .gemma_reasoner import (
 from .models import CandidatePlan, DeliveryRequest, StorageNode
 from .network import Network
 from .source_selector import PlanContext, generate_plans
+from .uncertainty import draw_parameters, reliability
 
 TYPE_RANK = {"single_source": 0, "multi_source_parallel": 1, "single_vehicle_multistop": 2}
 MAX_ALTERNATIVES = 6
@@ -128,7 +130,8 @@ def gemma_remedies(client: GemmaClient, network, usable, dest_node, request, pla
     prompt = (
         "A dealer's order cannot be delivered as requested. Propose up to 3 DIFFERENT practical alternatives a dealer "
         "might accept - e.g. a partial shipment now with the rest later, a modestly later deadline, or a smaller order. "
-        "Each has an integer quantity (<= the original), a deadline_hours, and a one-sentence rationale in plain language. "
+        "Each has an integer quantity (<= the original), a deadline_hours, and a one-sentence rationale in plain language "
+        "that contains NO digits and no numbers written as words (the quantity and deadline are shown separately). "
         "Do not repeat the already-verified options. Do not claim any option works: they will be checked by the "
         f"routing engine.\nFacts: {json.dumps(facts)}\n"
         'Respond with exactly one JSON object: {"proposals": [{"quantity": int, "deadline_hours": number, "rationale": string}]}'
@@ -141,8 +144,8 @@ def gemma_remedies(client: GemmaClient, network, usable, dest_node, request, pla
             q, h, why = int(pr["quantity"]), float(pr["deadline_hours"]), str(pr["rationale"]).strip()
         except (KeyError, TypeError, ValueError):
             continue
-        if not (0 < q <= request.quantity) or (q, round(h, 2)) in seen:
-            continue
+        if not (0 < q <= request.quantity) or (q, round(h, 2)) in seen or re.search(r"\d", why) or not why:
+            continue   # a rationale with a self-typed number is unverifiable, so the proposal is dropped
         r = verify_remedy(network, usable, dest_node, replace(request, quantity=q, deadline_hours=h), nm, "gemma",
                           "split_or_adjust", why, cache)
         if r:
@@ -151,9 +154,20 @@ def gemma_remedies(client: GemmaClient, network, usable, dest_node, request, pla
     return out
 
 
+_DRAWS = draw_parameters(300)
+
+
+def _with_reliability(d: dict, network: Network, plan: CandidatePlan, request: DeliveryRequest) -> dict:
+    d["reliability"] = reliability(network.graph, plan, request.deadline_hours, _DRAWS)
+    return d
+
+
 def process_request(network: Network, warehouses: List[StorageNode], request: DeliveryRequest,
                     reasoner: Optional[Reasoner] = None, weather: Optional[dict] = None,
-                    client: Optional[GemmaClient] = None) -> dict:
+                    client: Optional[GemmaClient] = None, defer_ai: bool = False) -> dict:
+    """``defer_ai=True`` returns the computed answer at once (rule-based text, computed remedies) with
+    ``ai.status == "pending"`` and a private ``_ctx``; ``enrich_with_ai`` then adds the model's contribution.
+    Model calls take 15 to 60 s on the free tier, so the dealer's answer never waits for them."""
     warnings: List[str] = []
     dest_node, dest_snap_m = network.snap(request.destination_lat, request.destination_lng)
     dn = network.nodes[dest_node]
@@ -176,7 +190,8 @@ def process_request(network: Network, warehouses: List[StorageNode], request: De
     plans = generate_plans(ctx) if usable else []
     feasible = sorted((p for p in plans if p.meets_deadline), key=policy_key)
 
-    reasoner = reasoner or get_reasoner()
+    deferred = defer_ai and client is not None
+    reasoner = DeterministicReasoner() if deferred else (reasoner or get_reasoner())
     gemma_error: Optional[str] = None
     try:
         sel = reasoner.explain(request, feasible if feasible else plans, bool(feasible), nm)
@@ -193,7 +208,7 @@ def process_request(network: Network, warehouses: List[StorageNode], request: De
     if not chosen and usable:
         cache: dict = ctx._sssp  # shortest-path trees already computed for this request
         remedies = computed_remedies(network, usable, dest_node, request, plans, nm, cache)
-        if client is not None:
+        if client is not None and not deferred:
             try:
                 remedies += gemma_remedies(client, network, usable, dest_node, request, plans, remedies, nm, cache)
             except Exception as exc:  # noqa: BLE001 - AI proposals are a bonus; computed options still stand
@@ -202,15 +217,16 @@ def process_request(network: Network, warehouses: List[StorageNode], request: De
     out = {
         "status": "feasible" if chosen else "infeasible",
         "risk_note": sel.risk_note or (deterministic_risk_note(chosen) if chosen else ""),
+        "risk_note_source": "deterministic",
         "remedies": remedies,
         "explanation": sel.explanation,
         "explanation_source": sel.source,
         "destination": {"name": request.destination_name, "lat": request.destination_lat,
                         "lng": request.destination_lng, "snapped_lat": dn.lat, "snapped_lng": dn.lng,
                         "snap_distance_m": round(dest_snap_m)},
-        "chosen_plan": plan_json(chosen) if chosen else None,
+        "chosen_plan": _with_reliability(plan_json(chosen), network, chosen, request) if chosen else None,
         "chosen_matches_policy": chosen is policy_choice if chosen else None,
-        "alternatives": [plan_json(p) for p in ranked[1:1 + MAX_ALTERNATIVES]],
+        "alternatives": [_with_reliability(plan_json(p), network, p, request) for p in ranked[1:1 + MAX_ALTERNATIVES]],
         "alternatives_total": max(len(ranked) - 1, 0),
         "best_case_hours": round(min(p.total_time_hours for p in plans), 3) if plans and not chosen else None,
         "candidates_evaluated": len(plans),
@@ -219,8 +235,58 @@ def process_request(network: Network, warehouses: List[StorageNode], request: De
         "weather": weather,
         "plan_summaries": [compact(p, nm) for p in (ranked or plans)[:MAX_ALTERNATIVES + 1]],
     }
+    if deferred:
+        out["ai"] = {"status": "pending"}
+        out["_ctx"] = {"network": network, "usable": usable, "dest_node": dest_node, "request": request, "plans": plans,
+                       "feasible": feasible, "nm": nm, "cache": ctx._sssp, "computed_remedies": remedies}
     if gemma_error:
         out["gemma_error"] = gemma_error
     if remedy_error:
         out["remedy_error"] = remedy_error
     return out
+
+
+def enrich_with_ai(ctx: dict, client: GemmaClient, reasoner: Optional[Reasoner] = None) -> dict:
+    """The model's contribution to an already-computed answer. Never raises: failures come back as ``ai.status``.
+
+    The explanation call and the remedy-proposal call run in parallel. Both are guarded: the chosen index must be a
+    deadline-feasible plan, the text may contain no model-typed number, and every proposal is re-run through the planner."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    req, feasible, plans, nm = ctx["request"], ctx["feasible"], ctx["plans"], ctx["nm"]
+    reasoner = reasoner or client  # LiveGemmaReasoner is both
+    pool = [feasible if feasible else plans]
+    patch: dict = {"ai": {"status": "done"}}
+
+    def explain():
+        return reasoner.explain(req, pool[0], bool(feasible), nm)
+
+    def propose():
+        if feasible or not ctx["usable"]:
+            return []
+        return gemma_remedies(client, ctx["network"], ctx["usable"], ctx["dest_node"], req, plans,
+                              ctx["computed_remedies"], nm, ctx["cache"])
+
+    with ThreadPoolExecutor(2) as ex:
+        f_explain, f_remedy = ex.submit(explain), ex.submit(propose)
+        try:
+            sel = f_explain.result()
+            patch.update(explanation=sel.explanation, explanation_source="gemma", risk_note=sel.risk_note,
+                         risk_note_source=sel.risk_source)
+            if feasible and sel.index is not None and sel.index != 0:
+                chosen = feasible[sel.index]
+                others = [p for p in feasible if p is not chosen]
+                patch.update(chosen_plan=_with_reliability(plan_json(chosen), ctx["network"], chosen, req), chosen_matches_policy=False,
+                             alternatives=[_with_reliability(plan_json(p), ctx["network"], p, req) for p in others[:MAX_ALTERNATIVES]],
+                             alternatives_total=len(others))
+            elif feasible:
+                patch["chosen_matches_policy"] = True
+        except Exception as exc:  # noqa: BLE001
+            patch["ai"] = {"status": "partial", "error": str(exc)}
+        try:
+            extra = f_remedy.result()
+            if extra:
+                patch["remedies"] = ctx["computed_remedies"] + extra
+        except Exception as exc:  # noqa: BLE001
+            patch["ai"] = {"status": "partial", "error": str(exc)}
+    return patch

@@ -6,9 +6,9 @@ import { RouteMap, type Pin } from "@/components/map/RouteMap";
 import { DestinationField } from "@/components/plan/DestinationField";
 import { ResultPanel } from "@/components/plan/ResultPanel";
 import { OrderIntake } from "@/components/plan/OrderIntake";
-import { optimizeRoute, useMeta, useNetwork, useWarehouses } from "@/lib/api";
+import { optimizeRoute, optimizeRouteAi, useMeta, useNetwork, useWarehouses } from "@/lib/api";
 import { formatInt } from "@/lib/format";
-import type { OptimizeResponse, Plan } from "@/lib/types";
+import type { AiPatch, OptimizeResponse, Plan } from "@/lib/types";
 
 export const Route = createFileRoute("/")({
   head: () => ({ meta: [{ title: "MargaAI Nepal — Delivery Route Optimizer" }] }),
@@ -27,15 +27,43 @@ function PlanPage() {
   const [selected, setSelected] = useState<Plan | null>(null);
   const [submitted, setSubmitted] = useState({ deadline: 6, name: "" });
 
+  // The computed answer arrives at once. The AI step (explanation, risk briefing, options) can take a minute,
+  // so it runs afterwards and is merged in when it finishes.
+  const [patch, setPatch] = useState<AiPatch | null>(null);
+  const aiRun = useMutation({
+    mutationFn: optimizeRouteAi,
+    onSuccess: (p: AiPatch) => {
+      setPatch(p);
+      if (p.chosen_plan) setSelected(p.chosen_plan);
+    },
+  });
   const run = useMutation({
     mutationFn: optimizeRoute,
-    onSuccess: (res: OptimizeResponse) => setSelected(res.chosen_plan),
+    onMutate: () => {
+      setPatch(null);
+      aiRun.reset();
+    },
+    onSuccess: (res: OptimizeResponse) => {
+      setSelected(res.chosen_plan);
+      if (res.ai?.status === "pending" && res.result_id) aiRun.mutate(res.result_id);
+    },
   });
-  const result = run.data;
+  const base = run.data;
+  const result: OptimizeResponse | undefined = base && patch ? { ...base, ...patch } : base;
+  const aiState: "none" | "pending" | "done" | "partial" = !base?.ai
+    ? "none"
+    : aiRun.isPending
+      ? "pending"
+      : aiRun.isError
+        ? "partial"
+        : (patch?.ai.status ?? "pending");
+  const aiError = aiRun.error?.message ?? patch?.ai.error;
 
   // A changed destination invalidates the previous answer.
   useEffect(() => {
     run.reset();
+    aiRun.reset();
+    setPatch(null);
     setSelected(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [destination?.lat, destination?.lng]);
@@ -117,6 +145,8 @@ function PlanPage() {
             destinationName={submitted.name}
             warehouses={warehouses}
             selected={selected}
+            aiState={aiState}
+            aiError={aiError}
             onSelect={setSelected}
             onApplyRemedy={(q, h) => {
               if (!destination) return;

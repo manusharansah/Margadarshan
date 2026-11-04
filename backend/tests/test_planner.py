@@ -116,3 +116,15 @@ def test_cached_shortest_path_trees_do_not_change_multistop_results(net):
     c2 = PlanContext(net.graph, {"A": wh("A", 0, 500, 1)}, 15, DeliveryRequest(0, 0, 400, 1000), sssp_cache=cache)
     b, b2 = multistop_plan(c2, "A"), multistop_plan(c2, "A")      # second call is served from the cache
     assert cache and (a.total_time_hours, a.total_edge_cost) == (b.total_time_hours, b.total_edge_cost) == (b2.total_time_hours, b2.total_edge_cost)
+
+
+def test_fuel_counts_every_vehicle_on_a_leg(net):
+    (p,) = generate_plans(ctx(net, [wh("A", 0, 900, 4)], 450, 100))      # 450 units -> 3 vehicles of 200
+    assert p.vehicles_used == 3
+    one_truck = path_metrics_fuel(net, p.legs[0].path)
+    assert p.legs[0].fuel_litres == pytest.approx(3 * one_truck) and p.fuel_litres == pytest.approx(3 * one_truck)
+
+
+def path_metrics_fuel(net, path):
+    from gis_backend.routing import path_metrics
+    return path_metrics(net.graph, path)["fuel_litres"]
