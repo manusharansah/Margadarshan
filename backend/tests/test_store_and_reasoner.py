@@ -160,12 +160,13 @@ def test_weather_failure_is_reported_not_invented():
     assert not w.is_stale()  # backs off instead of hammering a down provider
 
 
-def test_shipped_sample_inventory_is_valid_and_inside_study_area(tmp_path):
+@pytest.mark.parametrize("fname,prefix,count", [("warehouses.sample.csv", "SAMPLE-", 10), ("warehouses.demo.csv", "DEMO-", 14)])
+def test_shipped_example_inventories_are_valid_and_inside_study_area(tmp_path, fname, prefix, count):
     from pathlib import Path
-    sample = Path(__file__).resolve().parents[1] / "examples" / "warehouses.sample.csv"
+    sample = Path(__file__).resolve().parents[1] / "examples" / fname
     st = WarehouseStore(f"sqlite:///{tmp_path}/s.db")
-    assert st.import_csv(sample.read_text()) == 10
+    assert st.import_csv(sample.read_text()) == count
     ws = st.list()
-    assert len({w.node_id for w in ws}) == 10 and all(w.node_id.startswith("SAMPLE-") for w in ws)
+    assert len({w.node_id for w in ws}) == count and all(w.node_id.startswith(prefix) for w in ws)
     assert all(27.45 <= w.lat <= 27.80 and 85.25 <= w.lng <= 85.80 for w in ws)  # default ingest bbox
     assert any(w.vehicles_available == 0 for w in ws)  # exercises the stock-but-no-vehicle case

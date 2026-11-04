@@ -1,0 +1,15 @@
+id,name,lat,lng,units_in_stock,vehicles_available,vehicle_capacity
+DEMO-KTM-KAL,Demo Hub - Kathmandu Kalanki,27.6933,85.2814,4200,10,300
+DEMO-KTM-BAL,Demo Depot - Kathmandu Balaju,27.7350,85.3040,1500,4,250
+DEMO-KTM-KOT,Demo Hub - Kathmandu Koteshwor,27.6780,85.3490,3100,8,300
+DEMO-LAL-PUL,Demo Depot - Lalitpur Pulchowk,27.6784,85.3188,1100,3,200
+DEMO-BKT-THI,Demo Depot - Bhaktapur Thimi,27.6811,85.3857,1300,4,200
+DEMO-BKT-SUR,Demo Depot - Bhaktapur Suryabinayak,27.6550,85.4350,800,2,200
+DEMO-SNK-001,Demo Depot - Sankhu,27.7167,85.4667,420,1,150
+DEMO-NGK-001,Demo Depot - Nagarkot (hill),27.7156,85.5200,260,1,100
+DEMO-BNP-HUB,Demo Hub - Banepa,27.6298,85.5214,2400,6,250
+DEMO-DHK-001,Demo Depot - Dhulikhel,27.6186,85.5395,700,2,200
+DEMO-PNT-001,Demo Depot - Panauti,27.5847,85.5225,900,0,200
+DEMO-NMB-001,Demo Depot - Namobuddha,27.5780,85.5700,180,1,100
+DEMO-PCK-001,Demo Depot - Panchkhal,27.6333,85.6333,520,2,150
+DEMO-DLG-001,Demo Depot - Dolalghat,27.6392,85.7114,1050,3,250

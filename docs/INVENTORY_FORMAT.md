@@ -3,6 +3,9 @@
 MargaAI is operator-agnostic: it knows nothing about your business until you give it warehouses. Anyone can use it by
 supplying one CSV. A ready example is [`backend/examples/warehouses.sample.csv`](../backend/examples/warehouses.sample.csv)
 — **sample data only** (every id starts with `SAMPLE-`; stock and fleet numbers are invented to show the format).
+A larger demo set, [`warehouses.demo.csv`](../backend/examples/warehouses.demo.csv) (14 depots: big valley hubs, small hill depots,
+one depot with stock but no vehicles; ids start `DEMO-`), exercises every plan type. Both are **invented** — replace them with your own
+data before any real use.
 
 | Column | Required | Meaning | Rules |
 |---|---|---|---|
